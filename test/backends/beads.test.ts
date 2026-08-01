@@ -4,6 +4,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { BeadsRunResult, BeadsRunner } from "../../src/backends/beads.js";
 import { BeadsStore } from "../../src/backends/beads.js";
+import type {
+  PublicFollowup,
+  PublicFollowupMutation,
+} from "../../src/public-followup.js";
 
 let storePath: string;
 beforeEach(() => {
@@ -97,6 +101,50 @@ const LIST_FIXTURE = [
     closed_at: "2026-06-05T08:51:52Z",
   },
 ];
+
+const PUBLIC_FOLLOWUP_FIXTURE: PublicFollowup = {
+  schema_version: 1,
+  revision: 1,
+  request: {
+    request_id: "req-demo",
+    platform: "discord",
+    context_binding: { version: "ctx1", value: "ctx1_abc" },
+    public_safe_summary: "demo",
+    received_at: "2026-07-14T12:00:00Z",
+    followup_expires_at: "2026-10-14T12:00:00Z",
+    reservation_expires_at: "2026-07-14T13:00:00Z",
+  },
+  purpose: "promised-final",
+  expected_final: {
+    type: "pr-merged",
+    project: null,
+    required_deliverables: [],
+    completion_policy: "all-required",
+  },
+  obligation_expires_at: "2026-10-14T12:00:00Z",
+  delivery: {
+    state: "intent",
+    delivery_key: "fd1_abc",
+    payload_digest: null,
+    attempt_count: 0,
+    last_error_code: null,
+    next_attempt_at: null,
+    receipt: null,
+    last_error: null,
+    waiver: null,
+  },
+  work_relations: [],
+  lineage: {
+    predecessor_obligation_id: null,
+    successor_obligation_id: null,
+  },
+};
+
+const PUBLIC_FOLLOWUP_MUTATION_FIXTURE: PublicFollowupMutation = {
+  expectedRevision: 1,
+  expectedPublicFollowup: PUBLIC_FOLLOWUP_FIXTURE,
+  publicFollowup: PUBLIC_FOLLOWUP_FIXTURE,
+};
 
 describe("BeadsStore", () => {
   describe("capabilities", () => {
@@ -230,6 +278,35 @@ describe("BeadsStore", () => {
       expect(open?.hold).toBeUndefined();
     });
 
+    it("maps beads' built-in blocked status and any custom status to a captain hold, not plain queued", async () => {
+      const { run } = fakeRunner({
+        list: {
+          status: 0,
+          stdout: JSON.stringify([
+            { id: "task-blocked", title: "Blocked", status: "blocked" },
+            { id: "task-custom", title: "Custom", status: "in_review" },
+          ]),
+          stderr: "",
+        },
+      });
+      const store = new BeadsStore({ storePath, run });
+      const { items } = await store.list({});
+
+      const blocked = items.find((t) => t.id === "task-blocked");
+      expect(blocked?.state).toBe("queued");
+      expect(blocked?.hold).toEqual({
+        reason: "beads status: blocked",
+        kind: "captain",
+      });
+
+      const custom = items.find((t) => t.id === "task-custom");
+      expect(custom?.state).toBe("queued");
+      expect(custom?.hold).toEqual({
+        reason: "beads status: in_review",
+        kind: "captain",
+      });
+    });
+
     it("throws UNSUPPORTED when filtering by --repo (beads has no repo concept)", async () => {
       const { run } = fakeRunner({
         list: { status: 0, stdout: JSON.stringify(LIST_FIXTURE), stderr: "" },
@@ -323,6 +400,9 @@ describe("BeadsStore", () => {
     write("addDep", (s) => s.addDep("x", { type: "blocked-by", id: "y" }));
     write("removeDep", (s) =>
       s.removeDep("x", { type: "blocked-by", id: "y" }),
+    );
+    write("updatePublicFollowup", (s) =>
+      s.updatePublicFollowup("x", PUBLIC_FOLLOWUP_MUTATION_FIXTURE),
     );
   });
 

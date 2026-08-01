@@ -74,6 +74,7 @@ interface BeadsIssue {
 }
 
 const STATE_BY_STATUS: Record<string, State> = {
+  open: "queued",
   closed: "done",
   in_progress: "in_flight",
   hooked: "in_flight",
@@ -91,6 +92,17 @@ const HOLD_KIND_BY_STATUS: Partial<Record<string, HoldKind>> = {
   deferred: "future",
   pinned: "parked",
 };
+
+/**
+ * Beads' built-in `blocked` status and any custom status configured via
+ * `status.custom` (see `bd statuses`) default to a category excluded from
+ * `bd ready` unless explicitly given the `active` category. Rather than
+ * fall through to plain "queued" (which would wrongly surface them in
+ * tasks-axi's `ready`), treat any status outside the recognized set above as
+ * held pending a human decision, the same way a captain-held markdown task
+ * is excluded.
+ */
+const UNKNOWN_STATUS_HOLD_KIND: HoldKind = "captain";
 
 /** Inverse of STATE_BY_STATUS, used by `transition` to write a Task State back. */
 const STATUS_BY_STATE: Record<State, string> = {
@@ -133,7 +145,9 @@ function mapHold(
   status: string,
   metadata: Record<string, unknown> | undefined,
 ): Hold | undefined {
-  const kind = HOLD_KIND_BY_STATUS[status];
+  const kind =
+    HOLD_KIND_BY_STATUS[status] ??
+    (status in STATE_BY_STATUS ? undefined : UNKNOWN_STATUS_HOLD_KIND);
   if (!kind) return undefined;
   const storedReason = metadata?.[HOLD_REASON_METADATA_KEY];
   const reason =

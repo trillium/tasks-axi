@@ -537,13 +537,18 @@ describe("BeadsStore", () => {
       ]);
     });
 
-    it("hold kind=future: writes deferred status, --defer, and the reason as notes", async () => {
+    it("hold kind=future: writes deferred status, --defer, the reason as notes, and round-trips the reason via metadata", async () => {
       const { run, calls } = fakeRunner({
         show: [
           { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
           {
             status: 0,
-            stdout: JSON.stringify([issue({ status: "deferred" })]),
+            stdout: JSON.stringify([
+              issue({
+                status: "deferred",
+                metadata: { tasks_axi_hold_reason: "waiting on API access" },
+              }),
+            ]),
             stderr: "",
           },
         ],
@@ -556,6 +561,7 @@ describe("BeadsStore", () => {
 
       expect(result.changed).toEqual(["hold"]);
       expect(result.task.hold?.kind).toBe("future");
+      expect(result.task.hold?.reason).toBe("waiting on API access");
       const updateCall = calls.find((c) => c.args[0] === "update");
       expect(updateCall?.args).toEqual([
         "update",
@@ -566,6 +572,8 @@ describe("BeadsStore", () => {
         "waiting on API access",
         "--defer",
         "2026-09-01",
+        "--set-metadata",
+        "tasks_axi_hold_reason=waiting on API access",
       ]);
     });
 

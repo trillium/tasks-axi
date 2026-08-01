@@ -116,13 +116,31 @@ function metadataLinkKey(kind: LinkKind): string {
   return `tasks_axi_${kind}`;
 }
 
+/**
+ * Beads has no native hold-reason field either; the real `--reason` text is
+ * stashed here so it round-trips back into Hold.reason instead of the
+ * synthetic "beads status: X" placeholder, which would otherwise never equal
+ * what the caller passed to `hold --reason` and break holdCommand's
+ * sameHold() idempotency check.
+ */
+const HOLD_REASON_METADATA_KEY = "tasks_axi_hold_reason";
+
 function mapState(status: string): State {
   return STATE_BY_STATUS[status] ?? "queued";
 }
 
-function mapHold(status: string): Hold | undefined {
+function mapHold(
+  status: string,
+  metadata: Record<string, unknown> | undefined,
+): Hold | undefined {
   const kind = HOLD_KIND_BY_STATUS[status];
-  return kind ? { reason: `beads status: ${status}`, kind } : undefined;
+  if (!kind) return undefined;
+  const storedReason = metadata?.[HOLD_REASON_METADATA_KEY];
+  const reason =
+    typeof storedReason === "string" && storedReason
+      ? storedReason
+      : `beads status: ${status}`;
+  return { reason, kind };
 }
 
 function mapLinks(metadata: Record<string, unknown> | undefined): TaskLink[] {
@@ -168,7 +186,7 @@ function mapIssueToTask(raw: BeadsIssue): Task {
   if (raw.issue_type) task.kind = raw.issue_type;
   if (raw.description) task.body = raw.description;
   if (raw.priority !== undefined) task.priority = raw.priority;
-  const hold = mapHold(raw.status);
+  const hold = mapHold(raw.status, raw.metadata);
   if (hold) task.hold = hold;
   const created = toDateStamp(raw.created_at);
   if (created) task.created = created;
@@ -196,8 +214,14 @@ function defaultRunner(args: string[], env: NodeJS.ProcessEnv): BeadsRunResult {
       ],
     );
   }
+  if (result.status === null) {
+    throw new AxiError(
+      `\`bd ${args.join(" ")}\` was terminated by signal ${result.signal ?? "unknown"}`,
+      "UNKNOWN",
+    );
+  }
   return {
-    status: result.status ?? 0,
+    status: result.status,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
   };
@@ -396,10 +420,12 @@ export class BeadsStore implements Store {
       changed.push("priority");
     }
 
+    const metadataUpdates: Record<string, string> = {};
+
     if (patch.addLinks && patch.addLinks.length > 0) {
-      fields.setMetadata = Object.fromEntries(
-        patch.addLinks.map((link) => [metadataLinkKey(link.kind), link.url]),
-      );
+      for (const link of patch.addLinks) {
+        metadataUpdates[metadataLinkKey(link.kind)] = link.url;
+      }
       changed.push("links");
     }
 
@@ -427,7 +453,12 @@ export class BeadsStore implements Store {
       fields.appendNotes = fields.appendNotes
         ? `${fields.appendNotes}\n${patch.hold.reason}`
         : patch.hold.reason;
+      metadataUpdates[HOLD_REASON_METADATA_KEY] = patch.hold.reason;
       changed.push("hold");
+    }
+
+    if (Object.keys(metadataUpdates).length > 0) {
+      fields.setMetadata = metadataUpdates;
     }
 
     await this.runUpdate(id, this.buildUpdateArgs(fields));

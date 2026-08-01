@@ -244,15 +244,32 @@ done_keep = 10
 `archive` is optional; when omitted, pruned tasks are appended to `done-archive.md` next to the active backlog.
 Body replacements with `--archive-body` append superseded bodies to `note-archive.md` next to the active backlog.
 
+To source a [beads](https://github.com/gastownhall/beads) store instead:
+
+```toml
+# .tasks.toml in the project root
+backend = "beads"
+
+[beads]
+path = "/path/to/store/.beads"
+```
+
+Without an explicit path, the beads backend targets `~/data/tasks/.beads`.
+
 ## Backends
 
-P1 ships the **markdown** backend only, behind a narrow `Store` interface so additional backends slot in without touching the CLI layer.
+The markdown backend is read/write; the beads backend is read-only. Both sit behind the same narrow `Store` interface so additional backends slot in without touching the CLI layer.
 
-| Backend                | Status  |
-| ---------------------- | ------- |
-| markdown               | shipped |
-| sqlite                 | planned |
-| github / jira / linear | planned |
+| Backend                | Status              |
+| ---------------------- | -------------------- |
+| markdown               | shipped, read/write  |
+| beads                  | shipped, read-only   |
+| sqlite                 | planned              |
+| github / jira / linear | planned              |
+
+The beads backend shells out to the `bd` CLI (it must be on `PATH`) with `BEADS_DIR` pointed at the resolved store path, and `BD_NAME` read from that store's own `config.yaml`.
+It supports `list`, `ready`, and `show`; `add`/`update`/`close` and other mutations raise a structured `UNSUPPORTED` error — write to a beads store through `bd`/`task` directly.
+tasks-axi sources one backend at a time today; running both the markdown backlog and a beads store side by side means invoking tasks-axi twice with different `--backend`/`--file` flags. A true merged multi-source view (one `list` spanning both backends at once) is a tracked follow-up, not yet implemented.
 
 ## Development
 

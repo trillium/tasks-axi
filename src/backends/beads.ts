@@ -199,15 +199,22 @@ function mapIssueToTask(raw: BeadsIssue): Task {
   return task;
 }
 
+/** Bounds how long a hung `bd` (e.g. an unreachable Dolt server) can block the CLI. */
+const BD_TIMEOUT_MS = 30_000;
+
 function defaultRunner(args: string[], env: NodeJS.ProcessEnv): BeadsRunResult {
   const result = spawnSync("bd", args, {
     env,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
+    timeout: BD_TIMEOUT_MS,
   });
   if (result.error) {
+    const timedOut = (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT";
     throw new AxiError(
-      `Failed to run \`bd ${args.join(" ")}\`: ${result.error.message}`,
+      timedOut
+        ? `\`bd ${args.join(" ")}\` timed out after ${BD_TIMEOUT_MS}ms`
+        : `Failed to run \`bd ${args.join(" ")}\`: ${result.error.message}`,
       "UNKNOWN",
       [
         "Install beads (`bd`) and ensure it is on PATH, or use --backend markdown",
@@ -323,7 +330,11 @@ export class BeadsStore implements Store {
   }
 
   async get(id: string): Promise<Task | null> {
-    const { status, stdout, stderr } = this.exec(["show", id, "--json"]);
+    const { status, stdout, stderr } = this.exec([
+      "show",
+      `--id=${id}`,
+      "--json",
+    ]);
     if (status !== 0) {
       if (looksLikeNotFound(stdout, stderr)) return null;
       throw beadsCliError("show", stderr || stdout);

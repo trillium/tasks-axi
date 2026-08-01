@@ -281,6 +281,19 @@ describe("BeadsStore", () => {
       expect(await store.get("task-bogus")).toBeNull();
     });
 
+    it("passes the id via --id= rather than as a bare positional", async () => {
+      const { run, calls } = fakeRunner({
+        show: {
+          status: 0,
+          stdout: JSON.stringify([LIST_FIXTURE[0]]),
+          stderr: "",
+        },
+      });
+      const store = new BeadsStore({ storePath, run });
+      await store.get("task-vgd7");
+      expect(calls[0].args).toEqual(["show", "--id=task-vgd7", "--json"]);
+    });
+
     it("throws for any other CLI failure", async () => {
       const { run } = fakeRunner({
         show: { status: 1, stdout: "", stderr: "permission denied" },

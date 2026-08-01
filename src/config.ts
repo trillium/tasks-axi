@@ -13,8 +13,9 @@ import { AxiError } from "./errors.js";
  *   backlog.md/data/backlog.md, otherwise backlog.md; beads defaults to
  *   ~/data/tasks/.beads).
  *
- * P1 ships the markdown (read/write) and beads (read-only) backends; the
- * Store seam keeps sqlite/remote additions invisible to the CLI layer.
+ * P1 ships the markdown (read/write) and beads (read/write for status
+ * changes, partial otherwise) backends; the Store seam keeps sqlite/remote
+ * additions invisible to the CLI layer.
  */
 
 export interface ResolvedConfig {

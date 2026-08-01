@@ -180,6 +180,49 @@ describe("BeadsStore", () => {
       expect(items[0].deps).toEqual([{ type: "blocked-by", id: "task-b" }]);
     });
 
+    it("maps deferred/pinned statuses to queued plus an active hold, not plain queued", async () => {
+      const { run } = fakeRunner({
+        list: {
+          status: 0,
+          stdout: JSON.stringify([
+            { id: "task-deferred", title: "Deferred", status: "deferred" },
+            { id: "task-pinned", title: "Pinned", status: "pinned" },
+            { id: "task-open", title: "Open", status: "open" },
+          ]),
+          stderr: "",
+        },
+      });
+      const store = new BeadsStore({ storePath, run });
+      const { items } = await store.list({});
+
+      const deferred = items.find((t) => t.id === "task-deferred");
+      expect(deferred?.state).toBe("queued");
+      expect(deferred?.hold).toEqual({
+        reason: "beads status: deferred",
+        kind: "future",
+      });
+
+      const pinned = items.find((t) => t.id === "task-pinned");
+      expect(pinned?.state).toBe("queued");
+      expect(pinned?.hold).toEqual({
+        reason: "beads status: pinned",
+        kind: "parked",
+      });
+
+      const open = items.find((t) => t.id === "task-open");
+      expect(open?.hold).toBeUndefined();
+    });
+
+    it("throws UNSUPPORTED when filtering by --repo (beads has no repo concept)", async () => {
+      const { run } = fakeRunner({
+        list: { status: 0, stdout: JSON.stringify(LIST_FIXTURE), stderr: "" },
+      });
+      const store = new BeadsStore({ storePath, run });
+      await expect(store.list({ repo: "acme" })).rejects.toMatchObject({
+        code: "UNSUPPORTED",
+      });
+    });
+
     it("throws a structured error when the CLI exits non-zero", async () => {
       const { run } = fakeRunner({
         list: { status: 1, stdout: "", stderr: "dolt server unreachable" },

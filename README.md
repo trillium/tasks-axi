@@ -268,7 +268,7 @@ The markdown backend is read/write; the beads backend is read-only. Both sit beh
 | github / jira / linear | planned              |
 
 The beads backend shells out to the `bd` CLI (it must be on `PATH`) with `BEADS_DIR` pointed at the resolved store path, and `BD_NAME` read from that store's own `config.yaml`.
-It supports `list`, `ready`, and `show`; `add`/`update`/`close` and other mutations raise a structured `UNSUPPORTED` error — write to a beads store through `bd`/`task` directly.
+It supports `list`, `ready`, and `show`; `add`/`update`/`close` and other mutations raise a structured `UNSUPPORTED` error — write to a beads store through `bd`/`task` directly. `--repo` also raises `UNSUPPORTED` (beads issues have no repo concept). A beads issue with status `deferred` or `pinned` is surfaced as `queued` with an active hold, so it never shows up in `ready`.
 tasks-axi sources one backend at a time today; running both the markdown backlog and a beads store side by side means invoking tasks-axi twice with different `--backend`/`--file` flags. A true merged multi-source view (one `list` spanning both backends at once) is a tracked follow-up, not yet implemented.
 
 ## Development

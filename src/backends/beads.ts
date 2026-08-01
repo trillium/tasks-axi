@@ -4,6 +4,8 @@ import { AxiError, unsupported } from "../errors.js";
 import type {
   Dep,
   DepType,
+  Hold,
+  HoldKind,
   State,
   Task,
   TaskInput,
@@ -70,6 +72,19 @@ const STATE_BY_STATUS: Record<string, State> = {
   hooked: "in_flight",
 };
 
+/**
+ * `deferred`/`pinned` are beads' "frozen" category (`bd statuses`): the issue
+ * is deliberately parked with no dependency edge to back it, so it must not
+ * fall through to plain "queued" or it would show up in `ready` right next to
+ * genuinely available work. Modeled as an active hold (task.hold) rather than
+ * a state, matching how derive.ts already keeps held queued work out of
+ * ready/blocked.
+ */
+const HOLD_KIND_BY_STATUS: Partial<Record<string, HoldKind>> = {
+  deferred: "future",
+  pinned: "parked",
+};
+
 const DEP_TYPE_BY_EDGE: Record<string, DepType> = {
   blocks: "blocked-by",
   "parent-child": "parent",
@@ -78,6 +93,11 @@ const DEP_TYPE_BY_EDGE: Record<string, DepType> = {
 
 function mapState(status: string): State {
   return STATE_BY_STATUS[status] ?? "queued";
+}
+
+function mapHold(status: string): Hold | undefined {
+  const kind = HOLD_KIND_BY_STATUS[status];
+  return kind ? { reason: `beads status: ${status}`, kind } : undefined;
 }
 
 function mapDeps(edges: BeadsDependencyEdge[] | undefined): Dep[] {
@@ -113,6 +133,8 @@ function mapIssueToTask(raw: BeadsIssue): Task {
   if (raw.issue_type) task.kind = raw.issue_type;
   if (raw.description) task.body = raw.description;
   if (raw.priority !== undefined) task.priority = raw.priority;
+  const hold = mapHold(raw.status);
+  if (hold) task.hold = hold;
   const created = toDateStamp(raw.created_at);
   if (created) task.created = created;
   const updated = toDateStamp(raw.updated_at);
@@ -219,6 +241,7 @@ export class BeadsStore implements Store {
   }
 
   async list(query: TaskQuery): Promise<{ items: Task[]; total: number }> {
+    if (query.repo) throw unsupported("filtering by --repo", "beads");
     const { status, stdout, stderr } = this.exec([
       "list",
       "--all",
@@ -229,7 +252,6 @@ export class BeadsStore implements Store {
     if (status !== 0) throw beadsCliError("list", stderr || stdout);
     let items = parseJsonArray(stdout, "list").map(mapIssueToTask);
     if (query.state) items = items.filter((t) => t.state === query.state);
-    if (query.repo) items = items.filter((t) => t.repo === query.repo);
     if (query.kind) items = items.filter((t) => t.kind === query.kind);
     const total = items.length;
     if (query.limit !== undefined && query.limit >= 0) {

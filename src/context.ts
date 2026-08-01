@@ -1,6 +1,10 @@
 import { BeadsStore } from "./backends/beads.js";
 import { MarkdownStore } from "./backends/markdown.js";
-import { type ConfigOverrides, type ResolvedConfig, resolveConfig } from "./config.js";
+import {
+  type ConfigOverrides,
+  type ResolvedConfig,
+  resolveConfig,
+} from "./config.js";
 import { AxiError } from "./errors.js";
 import type { Store } from "./store.js";
 import type { SuggestionGlobals } from "./suggestions.js";
@@ -43,7 +47,9 @@ function resolveStore(config: ResolvedConfig): Store {
   throw new AxiError(
     `Unsupported backend "${config.backend}" — tasks-axi ships markdown and beads backends`,
     "UNSUPPORTED",
-    ['Set `backend = "markdown"` or `backend = "beads"` in .tasks.toml, or omit --backend'],
+    [
+      'Set `backend = "markdown"` or `backend = "beads"` in .tasks.toml, or omit --backend',
+    ],
   );
 }
 

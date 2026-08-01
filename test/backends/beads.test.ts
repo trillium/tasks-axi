@@ -14,7 +14,10 @@ afterEach(() => {
 });
 
 function writeConfigYaml(bdName: string): void {
-  writeFileSync(join(storePath, "config.yaml"), `issue-prefix: "task"\nBD_NAME: "${bdName}"\n`);
+  writeFileSync(
+    join(storePath, "config.yaml"),
+    `issue-prefix: "task"\nBD_NAME: "${bdName}"\n`,
+  );
 }
 
 interface FakeCall {
@@ -39,7 +42,9 @@ function fakeRunner(
     const key = args[0];
     const response = responses[key];
     if (!response) {
-      throw new Error(`no fake response registered for \`bd ${args.join(" ")}\``);
+      throw new Error(
+        `no fake response registered for \`bd ${args.join(" ")}\``,
+      );
     }
     if (!Array.isArray(response)) return response;
     const next = response.shift();
@@ -268,7 +273,8 @@ describe("BeadsStore", () => {
             error: "no issues found matching the provided IDs",
             schema_version: 1,
           }),
-          stderr: 'Error fetching task-bogus: no issue found matching "task-bogus"',
+          stderr:
+            'Error fetching task-bogus: no issue found matching "task-bogus"',
         },
       });
       const store = new BeadsStore({ storePath, run });
@@ -294,13 +300,17 @@ describe("BeadsStore", () => {
       it(`${method} throws UNSUPPORTED`, async () => {
         const { run } = fakeRunner({});
         const store = new BeadsStore({ storePath, run });
-        await expect(call(store)).rejects.toMatchObject({ code: "UNSUPPORTED" });
+        await expect(call(store)).rejects.toMatchObject({
+          code: "UNSUPPORTED",
+        });
       });
 
     write("create", (s) => s.create({ id: "x", title: "x" }));
     write("remove", (s) => s.remove("x"));
     write("addDep", (s) => s.addDep("x", { type: "blocked-by", id: "y" }));
-    write("removeDep", (s) => s.removeDep("x", { type: "blocked-by", id: "y" }));
+    write("removeDep", (s) =>
+      s.removeDep("x", { type: "blocked-by", id: "y" }),
+    );
   });
 
   describe("transition", () => {
@@ -390,7 +400,12 @@ describe("BeadsStore", () => {
       const store = new BeadsStore({ storePath, run });
       await store.transition("task-vgd7", "queued");
       const updateCall = calls.find((c) => c.args[0] === "update");
-      expect(updateCall?.args).toEqual(["update", "task-vgd7", "--status", "open"]);
+      expect(updateCall?.args).toEqual([
+        "update",
+        "task-vgd7",
+        "--status",
+        "open",
+      ]);
     });
 
     it("throws a structured error when the update CLI call fails", async () => {
@@ -398,9 +413,11 @@ describe("BeadsStore", () => {
         update: { status: 1, stdout: "", stderr: "dolt write conflict" },
       });
       const store = new BeadsStore({ storePath, run });
-      await expect(store.transition("task-vgd7", "done")).rejects.toMatchObject({
-        message: expect.stringContaining("dolt write conflict"),
-      });
+      await expect(store.transition("task-vgd7", "done")).rejects.toMatchObject(
+        {
+          message: expect.stringContaining("dolt write conflict"),
+        },
+      );
     });
   });
 
@@ -453,7 +470,9 @@ describe("BeadsStore", () => {
         archiveBody: true,
       });
 
-      expect(result.changed).toEqual(expect.arrayContaining(["archive", "body"]));
+      expect(result.changed).toEqual(
+        expect.arrayContaining(["archive", "body"]),
+      );
       const updateCall = calls.find((c) => c.args[0] === "update");
       expect(updateCall?.args).toEqual([
         "update",
@@ -492,18 +511,21 @@ describe("BeadsStore", () => {
           { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
           {
             status: 0,
-            stdout: JSON.stringify([
-              issue({ issue_type: "bug", priority: 3 }),
-            ]),
+            stdout: JSON.stringify([issue({ issue_type: "bug", priority: 3 })]),
             stderr: "",
           },
         ],
         update: { status: 0, stdout: "", stderr: "" },
       });
       const store = new BeadsStore({ storePath, run });
-      const result = await store.update("task-vgd7", { kind: "bug", priority: 3 });
+      const result = await store.update("task-vgd7", {
+        kind: "bug",
+        priority: 3,
+      });
 
-      expect(result.changed).toEqual(expect.arrayContaining(["kind", "priority"]));
+      expect(result.changed).toEqual(
+        expect.arrayContaining(["kind", "priority"]),
+      );
       const updateCall = calls.find((c) => c.args[0] === "update");
       expect(updateCall?.args).toEqual(
         expect.arrayContaining(["--type", "bug", "--priority", "3"]),
@@ -556,7 +578,11 @@ describe("BeadsStore", () => {
       });
       const store = new BeadsStore({ storePath, run });
       const result = await store.update("task-vgd7", {
-        hold: { reason: "waiting on API access", kind: "future", until: "2026-09-01" },
+        hold: {
+          reason: "waiting on API access",
+          kind: "future",
+          until: "2026-09-01",
+        },
       });
 
       expect(result.changed).toEqual(["hold"]);
@@ -619,7 +645,11 @@ describe("BeadsStore", () => {
             stdout: JSON.stringify([issue({ status: "deferred" })]),
             stderr: "",
           },
-          { status: 0, stdout: JSON.stringify([issue({ status: "open" })]), stderr: "" },
+          {
+            status: 0,
+            stdout: JSON.stringify([issue({ status: "open" })]),
+            stderr: "",
+          },
         ],
         update: { status: 0, stdout: "", stderr: "" },
       });
@@ -629,7 +659,12 @@ describe("BeadsStore", () => {
       expect(result.changed).toEqual(["hold"]);
       expect(result.task.hold).toBeUndefined();
       const updateCall = calls.find((c) => c.args[0] === "update");
-      expect(updateCall?.args).toEqual(["update", "task-vgd7", "--status", "open"]);
+      expect(updateCall?.args).toEqual([
+        "update",
+        "task-vgd7",
+        "--status",
+        "open",
+      ]);
     });
 
     it("no-op patch (nothing changed) skips the CLI update call", async () => {
@@ -637,7 +672,9 @@ describe("BeadsStore", () => {
         show: { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
       });
       const store = new BeadsStore({ storePath, run });
-      const result = await store.update("task-vgd7", { title: issue({}).title });
+      const result = await store.update("task-vgd7", {
+        title: issue({}).title,
+      });
 
       expect(result.changed).toEqual([]);
       expect(calls.some((c) => c.args[0] === "update")).toBe(false);

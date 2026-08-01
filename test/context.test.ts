@@ -25,7 +25,12 @@ describe("resolveTasksContext", () => {
   });
 
   it("resolves a BeadsStore for --backend beads", () => {
-    const ctx = resolveTasksContext({ cwd: dir, home, env: {}, backend: "beads" });
+    const ctx = resolveTasksContext({
+      cwd: dir,
+      home,
+      env: {},
+      backend: "beads",
+    });
     expect(ctx.store).toBeInstanceOf(BeadsStore);
     expect(ctx.config.backend).toBe("beads");
     expect(ctx.config.path).toBe(join(home, "data", "tasks", ".beads"));

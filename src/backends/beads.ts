@@ -276,7 +276,10 @@ export class BeadsStore implements Store {
   }
 
   private env(): NodeJS.ProcessEnv {
-    const env: NodeJS.ProcessEnv = { ...process.env, BEADS_DIR: this.storePath };
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      BEADS_DIR: this.storePath,
+    };
     if (this.bdName) env.BD_NAME = this.bdName;
     return env;
   }
@@ -478,7 +481,11 @@ export class BeadsStore implements Store {
     throw unsupported("remove", "beads");
   }
 
-  async transition(id: string, to: State, opts?: TransitionOpts): Promise<Task> {
+  async transition(
+    id: string,
+    to: State,
+    opts?: TransitionOpts,
+  ): Promise<Task> {
     const setMetadata: Record<string, string> = {};
     if (to === "done" && opts?.pr) setMetadata[metadataLinkKey("pr")] = opts.pr;
     if (to === "done" && opts?.report) {

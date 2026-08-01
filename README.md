@@ -260,12 +260,12 @@ Without an explicit path, the beads backend targets `~/data/tasks/.beads`.
 
 The markdown backend is read/write; the beads backend is read/write for status changes, with issue creation/removal and dependency edits staying on the `bd` CLI. Both sit behind the same narrow `Store` interface so additional backends slot in without touching the CLI layer.
 
-| Backend                | Status                          |
-| ---------------------- | -------------------------------- |
-| markdown               | shipped, read/write              |
-| beads                  | shipped, read/write (partial)    |
-| sqlite                 | planned                          |
-| github / jira / linear | planned                          |
+| Backend                | Status                        |
+| ---------------------- | ----------------------------- |
+| markdown               | shipped, read/write           |
+| beads                  | shipped, read/write (partial) |
+| sqlite                 | planned                       |
+| github / jira / linear | planned                       |
 
 The beads backend shells out to the `bd` CLI (it must be on `PATH`) with `BEADS_DIR` pointed at the resolved store path, and `BD_NAME` read from that store's own `config.yaml`.
 

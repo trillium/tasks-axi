@@ -10,10 +10,11 @@ import { AxiError } from "./errors.js";
  * Override order:
  *   --backend / --file flag > TASKS_AXI_* env > project .tasks.toml >
  *   ~/.tasks-axi/config.toml > defaults (markdown, first existing
- *   backlog.md/data/backlog.md, otherwise backlog.md).
+ *   backlog.md/data/backlog.md, otherwise backlog.md; beads defaults to
+ *   ~/data/tasks/.beads).
  *
- * P1 ships only the markdown backend; the Store seam keeps sqlite/remote
- * additions invisible to the CLI layer.
+ * P1 ships the markdown (read/write) and beads (read-only) backends; the
+ * Store seam keeps sqlite/remote additions invisible to the CLI layer.
  */
 
 export interface ResolvedConfig {

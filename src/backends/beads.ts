@@ -6,11 +6,14 @@ import type {
   DepType,
   Hold,
   HoldKind,
+  LinkKind,
   State,
   Task,
   TaskInput,
+  TaskLink,
   TaskPatch,
   TaskQuery,
+  TaskUpdateChange,
   TaskUpdateResult,
   TransitionOpts,
 } from "../model.js";
@@ -20,10 +23,13 @@ import { readFileSafe } from "./lock.js";
 
 /**
  * Sources tasks from a beads federation store (report follow-up: "source
- * from the task store too"). Read-only: `list`/`get` shell out to the `bd`
- * CLI and map its JSON onto the tasks-axi `Task` model. Every mutating verb
- * throws `unsupported` — beads is written through its own CLI/agents, not
- * through tasks-axi.
+ * from the task store too"). `list`/`get` shell out to the `bd` CLI and map
+ * its JSON onto the tasks-axi `Task` model. `transition`/`update` write
+ * through to the same store via `bd update`, respecting the state/hold
+ * mapping the read side establishes (see STATE_BY_STATUS / HOLD_KIND_BY_STATUS
+ * below and their inverses). `create`/`remove`/`addDep`/`removeDep`/
+ * `updatePublicFollowup` are out of scope — beads issue lifecycle and
+ * dependency editing stay on the `bd` CLI/agents — and throw `unsupported`.
  */
 
 export interface BeadsRunResult {
@@ -64,6 +70,7 @@ interface BeadsIssue {
   updated_at?: string;
   closed_at?: string;
   dependencies?: BeadsDependencyEdge[];
+  metadata?: Record<string, unknown>;
 }
 
 const STATE_BY_STATUS: Record<string, State> = {
@@ -85,11 +92,29 @@ const HOLD_KIND_BY_STATUS: Partial<Record<string, HoldKind>> = {
   pinned: "parked",
 };
 
+/** Inverse of STATE_BY_STATUS, used by `transition` to write a Task State back. */
+const STATUS_BY_STATE: Record<State, string> = {
+  queued: "open",
+  in_flight: "in_progress",
+  done: "closed",
+};
+
+/** Inverse of HOLD_KIND_BY_STATUS, used by `update` to write a Hold back. */
+const STATUS_BY_HOLD_KIND: Partial<Record<HoldKind, string>> = {
+  future: "deferred",
+  parked: "pinned",
+};
+
 const DEP_TYPE_BY_EDGE: Record<string, DepType> = {
   blocks: "blocked-by",
   "parent-child": "parent",
   "discovered-from": "discovered-from",
 };
+
+/** Beads has no native typed-link field; links round-trip through metadata. */
+function metadataLinkKey(kind: LinkKind): string {
+  return `tasks_axi_${kind}`;
+}
 
 function mapState(status: string): State {
   return STATE_BY_STATUS[status] ?? "queued";
@@ -98,6 +123,16 @@ function mapState(status: string): State {
 function mapHold(status: string): Hold | undefined {
   const kind = HOLD_KIND_BY_STATUS[status];
   return kind ? { reason: `beads status: ${status}`, kind } : undefined;
+}
+
+function mapLinks(metadata: Record<string, unknown> | undefined): TaskLink[] {
+  if (!metadata) return [];
+  const links: TaskLink[] = [];
+  for (const kind of ["pr", "report", "doc"] as const) {
+    const value = metadata[metadataLinkKey(kind)];
+    if (typeof value === "string" && value) links.push({ kind, url: value });
+  }
+  return links;
 }
 
 function mapDeps(edges: BeadsDependencyEdge[] | undefined): Dep[] {
@@ -126,7 +161,7 @@ function mapIssueToTask(raw: BeadsIssue): Task {
     id: raw.id,
     title: raw.title,
     state,
-    links: [],
+    links: mapLinks(raw.metadata),
     deps: mapDeps(raw.dependencies),
     meta: { beads_status: raw.status },
   };
@@ -275,10 +310,136 @@ export class BeadsStore implements Store {
     throw unsupported("create", "beads");
   }
 
+  /** Builds one `bd update <id> ...` flag list from the fields that changed. */
+  private buildUpdateArgs(fields: {
+    status?: string;
+    title?: string;
+    description?: string;
+    type?: string;
+    priority?: number;
+    appendNotes?: string;
+    defer?: string;
+    setMetadata?: Record<string, string>;
+  }): string[] {
+    const args: string[] = [];
+    if (fields.status !== undefined) args.push("--status", fields.status);
+    if (fields.title !== undefined) args.push("--title", fields.title);
+    if (fields.description !== undefined) {
+      args.push("--description", fields.description);
+    }
+    if (fields.type !== undefined) args.push("--type", fields.type);
+    if (fields.priority !== undefined) {
+      args.push("--priority", String(fields.priority));
+    }
+    if (fields.appendNotes !== undefined) {
+      args.push("--append-notes", fields.appendNotes);
+    }
+    if (fields.defer !== undefined) args.push("--defer", fields.defer);
+    for (const [key, value] of Object.entries(fields.setMetadata ?? {})) {
+      args.push("--set-metadata", `${key}=${value}`);
+    }
+    return args;
+  }
+
+  private async runUpdate(id: string, fieldArgs: string[]): Promise<void> {
+    if (fieldArgs.length === 0) return;
+    const { status, stdout, stderr } = this.exec(["update", id, ...fieldArgs]);
+    if (status !== 0) throw beadsCliError("update", stderr || stdout);
+  }
+
   async update(id: string, patch: TaskPatch): Promise<TaskUpdateResult> {
-    void id;
-    void patch;
-    throw unsupported("update", "beads");
+    if (patch.repo !== undefined) {
+      throw unsupported("updating --repo (beads has no repo concept)", "beads");
+    }
+    const current = await this.get(id);
+    if (!current) {
+      throw beadsCliError("update", `issue "${id}" not found`);
+    }
+
+    const changed: TaskUpdateChange[] = [];
+    const fields: Parameters<BeadsStore["buildUpdateArgs"]>[0] = {};
+
+    if (patch.title !== undefined && patch.title !== current.title) {
+      fields.title = patch.title;
+      changed.push("title");
+    }
+
+    if (patch.body !== undefined) {
+      if (patch.archiveBody && current.body) {
+        fields.appendNotes = `archived body: ${current.body}`;
+        changed.push("archive");
+      }
+      if (patch.body !== current.body) {
+        fields.description = patch.body;
+        changed.push("body");
+      }
+    } else if (patch.addBodyLines && patch.addBodyLines.length > 0) {
+      const existingLines = (current.body ?? "").split("\n");
+      const newLines = patch.addBodyLines.filter(
+        (line) => !existingLines.includes(line),
+      );
+      if (newLines.length > 0) {
+        fields.description = [current.body, ...newLines]
+          .filter((line) => line !== undefined && line !== "")
+          .join("\n");
+        changed.push("body");
+      }
+    }
+
+    if (patch.kind !== undefined && patch.kind !== current.kind) {
+      fields.type = patch.kind;
+      changed.push("kind");
+    }
+
+    if (patch.priority !== undefined && patch.priority !== current.priority) {
+      fields.priority = patch.priority;
+      changed.push("priority");
+    }
+
+    if (patch.addLinks && patch.addLinks.length > 0) {
+      fields.setMetadata = Object.fromEntries(
+        patch.addLinks.map((link) => [metadataLinkKey(link.kind), link.url]),
+      );
+      changed.push("links");
+    }
+
+    if (patch.hold === null) {
+      if (current.hold) {
+        fields.status = "open";
+        changed.push("hold");
+      }
+    } else if (patch.hold) {
+      const holdStatus = STATUS_BY_HOLD_KIND[patch.hold.kind ?? "future"];
+      if (!holdStatus) {
+        throw unsupported(
+          `hold kind "${patch.hold.kind}" (beads only models future -> deferred and parked -> pinned)`,
+          "beads",
+        );
+      }
+      if (patch.hold.until && holdStatus !== "deferred") {
+        throw unsupported(
+          "hold --until with a kind other than future (only beads' deferred status carries a date)",
+          "beads",
+        );
+      }
+      fields.status = holdStatus;
+      if (patch.hold.until) fields.defer = patch.hold.until;
+      fields.appendNotes = fields.appendNotes
+        ? `${fields.appendNotes}\n${patch.hold.reason}`
+        : patch.hold.reason;
+      changed.push("hold");
+    }
+
+    await this.runUpdate(id, this.buildUpdateArgs(fields));
+
+    if (changed.length === 0) {
+      return { task: current, changed: [] };
+    }
+    const task = await this.get(id);
+    if (!task) {
+      throw beadsCliError("update", `issue "${id}" not found after update`);
+    }
+    return { task, changed };
   }
 
   async remove(id: string): Promise<Task> {
@@ -287,10 +448,22 @@ export class BeadsStore implements Store {
   }
 
   async transition(id: string, to: State, opts?: TransitionOpts): Promise<Task> {
-    void id;
-    void to;
-    void opts;
-    throw unsupported("transition", "beads");
+    const setMetadata: Record<string, string> = {};
+    if (to === "done" && opts?.pr) setMetadata[metadataLinkKey("pr")] = opts.pr;
+    if (to === "done" && opts?.report) {
+      setMetadata[metadataLinkKey("report")] = opts.report;
+    }
+    const args = this.buildUpdateArgs({
+      status: STATUS_BY_STATE[to],
+      ...(to === "done" && opts?.note ? { appendNotes: opts.note } : {}),
+      ...(Object.keys(setMetadata).length > 0 ? { setMetadata } : {}),
+    });
+    await this.runUpdate(id, args);
+    const task = await this.get(id);
+    if (!task) {
+      throw beadsCliError("update", `issue "${id}" not found after transition`);
+    }
+    return task;
   }
 
   async addDep(id: string, dep: Dep): Promise<boolean> {

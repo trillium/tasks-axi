@@ -1,7 +1,7 @@
 # tasks-axi — agent notes
 
 Agent-ergonomic task/backlog CLI in the `*-axi` family, built on `axi-sdk-js` and mirroring `gh-axi`.
-P1 ships the markdown backend (read/write) and a beads backend (read-only) behind a `Store` seam; sqlite (P2) and remote trackers (P3) are deferred.
+P1 ships the markdown backend (read/write) and a beads backend (read/write for status changes, partial otherwise) behind a `Store` seam; sqlite (P2) and remote trackers (P3) are deferred.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ The CLI layer never knows which backend is active — it only talks to the `Stor
 - `src/model.ts` — the `Task` data model (report §5).
 - `src/derive.ts` - worker `blocked` / `ready` / active `held` and public delivery readiness are derived in the CLI from `list` + the dep graph + hold date gates, never Store methods, so every backend gets them for free.
 - `src/backends/markdown*.ts` — the read/write P1 backend.
-- `src/backends/beads.ts` — read-only backend sourcing a [beads](https://github.com/gastownhall/beads) store (default `~/data/tasks/.beads`) via the `bd` CLI (`BEADS_DIR` + `BD_NAME` read from that store's `config.yaml`); `create`/`update`/`remove`/`transition`/`addDep`/`removeDep`/`updatePublicFollowup` all throw `unsupported`. beads' `deferred`/`pinned` statuses (its "frozen" category — no backing dependency edge) map to `queued` plus an active `task.hold`, so derive.ts's `ready` excludes them the same way a captain-held markdown task is excluded; `--repo` also throws `unsupported` since beads issues have no repo concept. Tests inject a fake `run` (`BeadsRunner`) instead of spawning `bd`. One backend sources at a time — no merged multi-source `list` across markdown + beads yet.
+- `src/backends/beads.ts` — sources a [beads](https://github.com/gastownhall/beads) store (default `~/data/tasks/.beads`) via the `bd` CLI (`BEADS_DIR` + `BD_NAME` read from that store's `config.yaml`). `transition` and `update` write through via `bd update <id> --status/--title/--description/--type/--priority/--append-notes/--defer/--set-metadata` — one CLI call per mutation, covering `start`/`done`/`reopen`/`hold`/`unhold`/`update --title|--body|--kind|--priority|--pr|--report`. `create`/`remove`/`addDep`/`removeDep`/`updatePublicFollowup` all throw `unsupported` (issue lifecycle and dependency edits stay on the `bd` CLI); `--repo` throws `unsupported` on both read and write since beads issues have no repo concept. beads' `deferred`/`pinned` statuses (its "frozen" category — no backing dependency edge) map to `queued` plus an active `task.hold` (`kind: future`/`kind: parked` respectively — the only `HoldKind`s beads can represent; others throw `unsupported`, as does `hold --until` on a non-`future` kind), so derive.ts's `ready` excludes them the same way a captain-held markdown task is excluded. `TaskLink`s (`pr`/`report`/`doc`) round-trip through beads' `metadata` object as `tasks_axi_<kind>` keys — last-write-wins per kind, not a list. `update --body --archive-body` has no beads archive file, so the outgoing body is appended to the issue's `notes` via `--append-notes` before the description is replaced. Tests inject a fake `run` (`BeadsRunner`) instead of spawning `bd`. One backend sources at a time — no merged multi-source `list` across markdown + beads yet.
 - `src/public-followup.ts` - authoritative versioned schema, strict privacy-safe validation, canonical encoding, immutable-field checks, relation/event readiness, and terminal-state invariants for `kind=public-followup`; `src/commands/public-followup.ts` owns its dedicated CLI state machine.
 - `src/commands/*` — one file per verb group; `src/view.ts` owns the read-side TOON projection; `src/confirm.ts` owns the write-side output (the `ok:` confirmation line, the `--json` payload, and `renderMutation`, which assembles both).
 - Shared helpers copied from the family: `args.ts`, `body.ts`, `format.ts`, `fields.ts`, `toon.ts`, `suggestions.ts`, `skill.ts`.
@@ -88,7 +88,8 @@ The CLI layer never knows which backend is active — it only talks to the `Stor
 - Migrate firstmate's own `backlog.md` onto tasks-axi (a separate firstmate-repo change).
 - sqlite backend (P2); github/jira/linear backends (P3) — slot in behind the existing `Store` seam.
 - Optional: count free-form Done lines toward the prune keep, or recognize compound ids (`a / b`).
-- Multi-source merge: a single `list`/`ready` spanning the markdown backlog and a beads store at once. Today each backend sources independently via `--backend`; write-through for the beads backend (`add`/`update`/`close`) is also deferred.
+- Multi-source merge: a single `list`/`ready` spanning the markdown backlog and a beads store at once. Today each backend sources independently via `--backend`.
+- beads write-through for issue lifecycle (`add`/`rm`) and dependency edits (`block`/`unblock`) — `start`/`done`/`reopen`/`hold`/`unhold`/`update` (status/title/body/kind/priority/links) already write through; see `src/backends/beads.ts`.
 
 ## Maintaining this file
 

@@ -22,7 +22,14 @@ interface FakeCall {
   env: NodeJS.ProcessEnv;
 }
 
-function fakeRunner(responses: Record<string, BeadsRunResult>): {
+/**
+ * Responses are keyed by the first CLI arg (`list`/`show`/`update`). A single
+ * response is replayed for every call; an array is consumed in order, letting
+ * a test model a `show` result changing across an update's before/after reads.
+ */
+function fakeRunner(
+  responses: Record<string, BeadsRunResult | BeadsRunResult[]>,
+): {
   run: BeadsRunner;
   calls: FakeCall[];
 } {
@@ -34,7 +41,12 @@ function fakeRunner(responses: Record<string, BeadsRunResult>): {
     if (!response) {
       throw new Error(`no fake response registered for \`bd ${args.join(" ")}\``);
     }
-    return response;
+    if (!Array.isArray(response)) return response;
+    const next = response.shift();
+    if (!next) {
+      throw new Error(`fake responses for \`bd ${key}\` exhausted`);
+    }
+    return next;
   };
   return { run, calls };
 }
@@ -274,7 +286,7 @@ describe("BeadsStore", () => {
     });
   });
 
-  describe("write methods", () => {
+  describe("still-unsupported write methods", () => {
     const write = (
       method: string,
       call: (store: BeadsStore) => Promise<unknown>,
@@ -286,10 +298,349 @@ describe("BeadsStore", () => {
       });
 
     write("create", (s) => s.create({ id: "x", title: "x" }));
-    write("update", (s) => s.update("x", {}));
     write("remove", (s) => s.remove("x"));
-    write("transition", (s) => s.transition("x", "done"));
     write("addDep", (s) => s.addDep("x", { type: "blocked-by", id: "y" }));
     write("removeDep", (s) => s.removeDep("x", { type: "blocked-by", id: "y" }));
+  });
+
+  describe("transition", () => {
+    function issue(overrides: Partial<(typeof LIST_FIXTURE)[0]>) {
+      return { ...LIST_FIXTURE[0], ...overrides };
+    }
+
+    it("start: writes --status in_progress and returns the re-read task", async () => {
+      const { run, calls } = fakeRunner({
+        update: { status: 0, stdout: "", stderr: "" },
+        show: {
+          status: 0,
+          stdout: JSON.stringify([issue({ status: "in_progress" })]),
+          stderr: "",
+        },
+      });
+      const store = new BeadsStore({ storePath, run });
+      const task = await store.transition("task-vgd7", "in_flight");
+
+      expect(task.state).toBe("in_flight");
+      const updateCall = calls.find((c) => c.args[0] === "update");
+      expect(updateCall?.args).toEqual([
+        "update",
+        "task-vgd7",
+        "--status",
+        "in_progress",
+      ]);
+    });
+
+    it("done: writes --status closed plus note/pr/report and round-trips links via metadata", async () => {
+      const { run, calls } = fakeRunner({
+        update: { status: 0, stdout: "", stderr: "" },
+        show: {
+          status: 0,
+          stdout: JSON.stringify([
+            issue({
+              status: "closed",
+              closed_at: "2026-08-01T00:00:00Z",
+              metadata: {
+                tasks_axi_pr: "https://github.com/o/r/pull/1",
+                tasks_axi_report: "data/x/report.md",
+              },
+            }),
+          ]),
+          stderr: "",
+        },
+      });
+      const store = new BeadsStore({ storePath, run });
+      const task = await store.transition("task-vgd7", "done", {
+        pr: "https://github.com/o/r/pull/1",
+        report: "data/x/report.md",
+        note: "shipped",
+      });
+
+      expect(task.state).toBe("done");
+      expect(task.closed).toBe("2026-08-01");
+      expect(task.links).toEqual(
+        expect.arrayContaining([
+          { kind: "pr", url: "https://github.com/o/r/pull/1" },
+          { kind: "report", url: "data/x/report.md" },
+        ]),
+      );
+      const updateCall = calls.find((c) => c.args[0] === "update");
+      expect(updateCall?.args).toEqual([
+        "update",
+        "task-vgd7",
+        "--status",
+        "closed",
+        "--append-notes",
+        "shipped",
+        "--set-metadata",
+        "tasks_axi_pr=https://github.com/o/r/pull/1",
+        "--set-metadata",
+        "tasks_axi_report=data/x/report.md",
+      ]);
+    });
+
+    it("reopen: writes --status open", async () => {
+      const { run, calls } = fakeRunner({
+        update: { status: 0, stdout: "", stderr: "" },
+        show: {
+          status: 0,
+          stdout: JSON.stringify([issue({ status: "open" })]),
+          stderr: "",
+        },
+      });
+      const store = new BeadsStore({ storePath, run });
+      await store.transition("task-vgd7", "queued");
+      const updateCall = calls.find((c) => c.args[0] === "update");
+      expect(updateCall?.args).toEqual(["update", "task-vgd7", "--status", "open"]);
+    });
+
+    it("throws a structured error when the update CLI call fails", async () => {
+      const { run } = fakeRunner({
+        update: { status: 1, stdout: "", stderr: "dolt write conflict" },
+      });
+      const store = new BeadsStore({ storePath, run });
+      await expect(store.transition("task-vgd7", "done")).rejects.toMatchObject({
+        message: expect.stringContaining("dolt write conflict"),
+      });
+    });
+  });
+
+  describe("update", () => {
+    function issue(overrides: Partial<(typeof LIST_FIXTURE)[0]>) {
+      return { ...LIST_FIXTURE[0], ...overrides };
+    }
+
+    it("title: writes --title and reports the changed field", async () => {
+      const { run, calls } = fakeRunner({
+        show: [
+          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
+          {
+            status: 0,
+            stdout: JSON.stringify([issue({ title: "New title" })]),
+            stderr: "",
+          },
+        ],
+        update: { status: 0, stdout: "", stderr: "" },
+      });
+      const store = new BeadsStore({ storePath, run });
+      const result = await store.update("task-vgd7", { title: "New title" });
+
+      expect(result.changed).toEqual(["title"]);
+      expect(result.task.title).toBe("New title");
+      const updateCall = calls.find((c) => c.args[0] === "update");
+      expect(updateCall?.args).toEqual([
+        "update",
+        "task-vgd7",
+        "--title",
+        "New title",
+      ]);
+    });
+
+    it("body: writes --description; archiveBody also appends the old body to notes", async () => {
+      const { run, calls } = fakeRunner({
+        show: [
+          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
+          {
+            status: 0,
+            stdout: JSON.stringify([issue({ description: "New body" })]),
+            stderr: "",
+          },
+        ],
+        update: { status: 0, stdout: "", stderr: "" },
+      });
+      const store = new BeadsStore({ storePath, run });
+      const result = await store.update("task-vgd7", {
+        body: "New body",
+        archiveBody: true,
+      });
+
+      expect(result.changed).toEqual(expect.arrayContaining(["archive", "body"]));
+      const updateCall = calls.find((c) => c.args[0] === "update");
+      expect(updateCall?.args).toEqual([
+        "update",
+        "task-vgd7",
+        "--description",
+        "New body",
+        "--append-notes",
+        "archived body: Full description of the thing.",
+      ]);
+    });
+
+    it("addBodyLines: appends only lines not already present", async () => {
+      const { run, calls } = fakeRunner({
+        show: [
+          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
+          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
+        ],
+        update: { status: 0, stdout: "", stderr: "" },
+      });
+      const store = new BeadsStore({ storePath, run });
+      await store.update("task-vgd7", {
+        addBodyLines: ["Full description of the thing.", "A new line"],
+      });
+      const updateCall = calls.find((c) => c.args[0] === "update");
+      expect(updateCall?.args).toEqual([
+        "update",
+        "task-vgd7",
+        "--description",
+        "Full description of the thing.\nA new line",
+      ]);
+    });
+
+    it("kind and priority: writes --type and --priority", async () => {
+      const { run, calls } = fakeRunner({
+        show: [
+          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
+          {
+            status: 0,
+            stdout: JSON.stringify([
+              issue({ issue_type: "bug", priority: 3 }),
+            ]),
+            stderr: "",
+          },
+        ],
+        update: { status: 0, stdout: "", stderr: "" },
+      });
+      const store = new BeadsStore({ storePath, run });
+      const result = await store.update("task-vgd7", { kind: "bug", priority: 3 });
+
+      expect(result.changed).toEqual(expect.arrayContaining(["kind", "priority"]));
+      const updateCall = calls.find((c) => c.args[0] === "update");
+      expect(updateCall?.args).toEqual(
+        expect.arrayContaining(["--type", "bug", "--priority", "3"]),
+      );
+    });
+
+    it("addLinks: writes pr/report links as metadata and round-trips them on read", async () => {
+      const { run } = fakeRunner({
+        show: [
+          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
+          {
+            status: 0,
+            stdout: JSON.stringify([
+              issue({
+                metadata: { tasks_axi_pr: "https://github.com/o/r/pull/9" },
+              }),
+            ]),
+            stderr: "",
+          },
+        ],
+        update: { status: 0, stdout: "", stderr: "" },
+      });
+      const store = new BeadsStore({ storePath, run });
+      const result = await store.update("task-vgd7", {
+        addLinks: [{ kind: "pr", url: "https://github.com/o/r/pull/9" }],
+      });
+
+      expect(result.changed).toEqual(["links"]);
+      expect(result.task.links).toEqual([
+        { kind: "pr", url: "https://github.com/o/r/pull/9" },
+      ]);
+    });
+
+    it("hold kind=future: writes deferred status, --defer, and the reason as notes", async () => {
+      const { run, calls } = fakeRunner({
+        show: [
+          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
+          {
+            status: 0,
+            stdout: JSON.stringify([issue({ status: "deferred" })]),
+            stderr: "",
+          },
+        ],
+        update: { status: 0, stdout: "", stderr: "" },
+      });
+      const store = new BeadsStore({ storePath, run });
+      const result = await store.update("task-vgd7", {
+        hold: { reason: "waiting on API access", kind: "future", until: "2026-09-01" },
+      });
+
+      expect(result.changed).toEqual(["hold"]);
+      expect(result.task.hold?.kind).toBe("future");
+      const updateCall = calls.find((c) => c.args[0] === "update");
+      expect(updateCall?.args).toEqual([
+        "update",
+        "task-vgd7",
+        "--status",
+        "deferred",
+        "--append-notes",
+        "waiting on API access",
+        "--defer",
+        "2026-09-01",
+      ]);
+    });
+
+    it("hold kind=parked: writes pinned status", async () => {
+      const { run, calls } = fakeRunner({
+        show: [
+          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
+          {
+            status: 0,
+            stdout: JSON.stringify([issue({ status: "pinned" })]),
+            stderr: "",
+          },
+        ],
+        update: { status: 0, stdout: "", stderr: "" },
+      });
+      const store = new BeadsStore({ storePath, run });
+      const result = await store.update("task-vgd7", {
+        hold: { reason: "persistent", kind: "parked" },
+      });
+
+      expect(result.task.hold?.kind).toBe("parked");
+      const updateCall = calls.find((c) => c.args[0] === "update");
+      expect(updateCall?.args).toContain("pinned");
+    });
+
+    it("hold kind=captain: throws UNSUPPORTED (beads has no captain-hold status)", async () => {
+      const { run } = fakeRunner({
+        show: { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
+      });
+      const store = new BeadsStore({ storePath, run });
+      await expect(
+        store.update("task-vgd7", {
+          hold: { reason: "captain review", kind: "captain" },
+        }),
+      ).rejects.toMatchObject({ code: "UNSUPPORTED" });
+    });
+
+    it("clearing a hold (hold: null) writes --status open", async () => {
+      const { run, calls } = fakeRunner({
+        show: [
+          {
+            status: 0,
+            stdout: JSON.stringify([issue({ status: "deferred" })]),
+            stderr: "",
+          },
+          { status: 0, stdout: JSON.stringify([issue({ status: "open" })]), stderr: "" },
+        ],
+        update: { status: 0, stdout: "", stderr: "" },
+      });
+      const store = new BeadsStore({ storePath, run });
+      const result = await store.update("task-vgd7", { hold: null });
+
+      expect(result.changed).toEqual(["hold"]);
+      expect(result.task.hold).toBeUndefined();
+      const updateCall = calls.find((c) => c.args[0] === "update");
+      expect(updateCall?.args).toEqual(["update", "task-vgd7", "--status", "open"]);
+    });
+
+    it("no-op patch (nothing changed) skips the CLI update call", async () => {
+      const { run, calls } = fakeRunner({
+        show: { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
+      });
+      const store = new BeadsStore({ storePath, run });
+      const result = await store.update("task-vgd7", { title: issue({}).title });
+
+      expect(result.changed).toEqual([]);
+      expect(calls.some((c) => c.args[0] === "update")).toBe(false);
+    });
+
+    it("throws UNSUPPORTED for --repo (beads has no repo concept)", async () => {
+      const { run } = fakeRunner({});
+      const store = new BeadsStore({ storePath, run });
+      await expect(
+        store.update("task-vgd7", { repo: "acme" }),
+      ).rejects.toMatchObject({ code: "UNSUPPORTED" });
+    });
   });
 });

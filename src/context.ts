@@ -1,5 +1,10 @@
+import { BeadsStore } from "./backends/beads.js";
 import { MarkdownStore } from "./backends/markdown.js";
-import { type ConfigOverrides, type ResolvedConfig, resolveConfig } from "./config.js";
+import {
+  type ConfigOverrides,
+  type ResolvedConfig,
+  resolveConfig,
+} from "./config.js";
 import { AxiError } from "./errors.js";
 import type { Store } from "./store.js";
 import type { SuggestionGlobals } from "./suggestions.js";
@@ -21,23 +26,31 @@ export function resolveTasksContext(
 ): TasksContext {
   const config = resolveConfig(overrides);
 
-  if (config.backend !== "markdown") {
-    throw new AxiError(
-      `Unsupported backend "${config.backend}" — P1 ships the markdown backend only`,
-      "UNSUPPORTED",
-      ['Set `backend = "markdown"` in .tasks.toml, or omit --backend'],
-    );
-  }
-
-  const store = new MarkdownStore({
-    path: config.path,
-    ...(config.archivePath ? { archivePath: config.archivePath } : {}),
-  });
+  const store = resolveStore(config);
   return {
     store,
     config,
     ...(suggestionGlobals ? { suggestionGlobals } : {}),
   };
+}
+
+function resolveStore(config: ResolvedConfig): Store {
+  if (config.backend === "markdown") {
+    return new MarkdownStore({
+      path: config.path,
+      ...(config.archivePath ? { archivePath: config.archivePath } : {}),
+    });
+  }
+  if (config.backend === "beads") {
+    return new BeadsStore({ storePath: config.path });
+  }
+  throw new AxiError(
+    `Unsupported backend "${config.backend}" — tasks-axi ships markdown and beads backends`,
+    "UNSUPPORTED",
+    [
+      'Set `backend = "markdown"` or `backend = "beads"` in .tasks.toml, or omit --backend',
+    ],
+  );
 }
 
 /** Narrow an optional context to a present one (the resolver always sets it). */

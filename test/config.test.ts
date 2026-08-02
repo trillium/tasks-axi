@@ -36,6 +36,14 @@ describe("parseConfigToml", () => {
     });
   });
 
+  it("reads the [beads] table", () => {
+    const cfg = parseConfigToml(
+      ['backend = "beads"', "", "[beads]", 'path = "/abs/store"'].join("\n"),
+    );
+    expect(cfg.backend).toBe("beads");
+    expect(cfg.beads).toEqual({ path: "/abs/store" });
+  });
+
   it("ignores unknown keys and tables", () => {
     const cfg = parseConfigToml('[sqlite]\npath = ".tasks.db"\npath: broken\n');
     expect(cfg.markdown).toBeUndefined();
@@ -61,9 +69,9 @@ describe("parseConfigToml", () => {
   });
 
   it("rejects a non-numeric done_keep value", () => {
-    expect(() =>
-      parseConfigToml("[markdown]\ndone_keep = many\n"),
-    ).toThrow(/done_keep/);
+    expect(() => parseConfigToml("[markdown]\ndone_keep = many\n")).toThrow(
+      /done_keep/,
+    );
   });
 
   it("rejects malformed assignments in the top-level scope", () => {
@@ -153,14 +161,11 @@ describe("resolveConfig", () => {
     );
   });
 
-  it.each(["", "   "])(
-    "rejects an empty TASKS_AXI_FILE value %#",
-    (value) => {
-      expect(() =>
-        resolveConfig({ cwd: dir, home, env: { TASKS_AXI_FILE: value } }),
-      ).toThrow(/TASKS_AXI_FILE/);
-    },
-  );
+  it.each(["", "   "])("rejects an empty TASKS_AXI_FILE value %#", (value) => {
+    expect(() =>
+      resolveConfig({ cwd: dir, home, env: { TASKS_AXI_FILE: value } }),
+    ).toThrow(/TASKS_AXI_FILE/);
+  });
 
   it.each(["", "   "])(
     "rejects an empty markdown path from toml %#",
@@ -174,4 +179,34 @@ describe("resolveConfig", () => {
       );
     },
   );
+
+  it("defaults the beads backend to <home>/data/tasks/.beads", () => {
+    const cfg = resolveConfig({
+      cwd: dir,
+      home,
+      env: { TASKS_AXI_BACKEND: "beads" },
+    });
+    expect(cfg.backend).toBe("beads");
+    expect(cfg.path).toBe(join(home, "data", "tasks", ".beads"));
+  });
+
+  it("honors [beads] path from project toml over the default", () => {
+    writeFileSync(
+      join(dir, ".tasks.toml"),
+      'backend = "beads"\n[beads]\npath = "/abs/other-store"\n',
+    );
+    const cfg = resolveConfig({ cwd: dir, home, env: {} });
+    expect(cfg.backend).toBe("beads");
+    expect(cfg.path).toBe("/abs/other-store");
+  });
+
+  it("honors --file / TASKS_AXI_FILE overrides for the beads backend", () => {
+    const cfg = resolveConfig({
+      cwd: dir,
+      home,
+      env: { TASKS_AXI_BACKEND: "beads" },
+      file: "/abs/from-flag-beads",
+    });
+    expect(cfg.path).toBe("/abs/from-flag-beads");
+  });
 });

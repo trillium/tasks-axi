@@ -10,9 +10,11 @@ import { AxiError } from "./errors.js";
  * Override order:
  *   --backend / --file flag > TASKS_AXI_* env > project .tasks.toml >
  *   ~/.tasks-axi/config.toml > defaults (markdown, first existing
- *   backlog.md/data/backlog.md, otherwise backlog.md).
+ *   backlog.md/data/backlog.md, otherwise backlog.md; beads defaults to
+ *   ~/data/tasks/.beads).
  *
- * P1 ships only the markdown backend; the Store seam keeps sqlite/remote
+ * P1 ships the markdown (read/write) and beads (read/write for status
+ * changes, partial otherwise) backends; the Store seam keeps sqlite/remote
  * additions invisible to the CLI layer.
  */
 
@@ -40,11 +42,15 @@ interface TomlConfig {
     archive?: string;
     done_keep?: number;
   };
+  beads?: {
+    path?: string;
+  };
 }
 
 const DEFAULT_KEEP = 10;
 const PATH_CANDIDATES = ["backlog.md", "data/backlog.md"];
-type ConfigTable = "root" | "markdown" | "unsupported";
+const DEFAULT_BEADS_PATH = ["data", "tasks", ".beads"];
+type ConfigTable = "root" | "markdown" | "beads" | "unsupported";
 
 /**
  * Minimal TOML reader for the tiny config surface we need: a top-level
@@ -62,7 +68,8 @@ export function parseConfigToml(src: string): TomlConfig {
 
     const section = line.match(/^\[([^\]]+)\]$/);
     if (section) {
-      table = section[1].trim() === "markdown" ? "markdown" : "unsupported";
+      const name = section[1].trim();
+      table = name === "markdown" || name === "beads" ? name : "unsupported";
       continue;
     }
 
@@ -83,6 +90,11 @@ export function parseConfigToml(src: string): TomlConfig {
 
     if (table === "root") {
       config.backend = requireTomlString(value, source);
+      continue;
+    }
+    if (table === "beads") {
+      config.beads ??= {};
+      if (key === "path") config.beads.path = requireTomlString(value, source);
       continue;
     }
     config.markdown ??= {};
@@ -121,10 +133,7 @@ function stripTomlComment(raw: string): string {
   return raw;
 }
 
-function configKeySource(
-  table: ConfigTable,
-  key: string,
-): string | undefined {
+function configKeySource(table: ConfigTable, key: string): string | undefined {
   if (table === "root" && key === "backend") return "backend";
   if (
     table === "markdown" &&
@@ -132,6 +141,7 @@ function configKeySource(
   ) {
     return `markdown.${key}`;
   }
+  if (table === "beads" && key === "path") return "beads.path";
   return undefined;
 }
 
@@ -161,13 +171,17 @@ function loadToml(path: string): TomlConfig {
   return src ? parseConfigToml(src) : {};
 }
 
-function resolveMarkdownPath(
+function resolveStorePath(
+  backend: string,
   explicit: string | undefined,
   tomlPath: string | undefined,
   cwd: string,
+  home: string,
 ): string {
   const chosen = explicit ?? tomlPath;
   if (chosen) return isAbsolute(chosen) ? chosen : resolve(cwd, chosen);
+
+  if (backend === "beads") return join(home, ...DEFAULT_BEADS_PATH);
 
   for (const candidate of PATH_CANDIDATES) {
     const full = resolve(cwd, candidate);
@@ -208,6 +222,13 @@ export function resolveConfig(overrides: ConfigOverrides = {}): ResolvedConfig {
   const homeToml = loadToml(join(home, ".tasks-axi", "config.toml"));
   const projectToml = loadToml(resolve(cwd, ".tasks.toml"));
 
+  const backend =
+    overrides.backend ??
+    env.TASKS_AXI_BACKEND ??
+    projectToml.backend ??
+    homeToml.backend ??
+    "markdown";
+
   const explicitPath =
     overrides.file !== undefined
       ? validatePathValue(overrides.file, "--file")
@@ -217,18 +238,13 @@ export function resolveConfig(overrides: ConfigOverrides = {}): ResolvedConfig {
   const tomlPath =
     explicitPath !== undefined
       ? undefined
-      : projectToml.markdown?.path !== undefined
-        ? validatePathValue(projectToml.markdown.path, "markdown.path")
-        : validatePathValue(homeToml.markdown?.path, "markdown.path");
+      : backend === "beads"
+        ? (validatePathValue(projectToml.beads?.path, "beads.path") ??
+          validatePathValue(homeToml.beads?.path, "beads.path"))
+        : (validatePathValue(projectToml.markdown?.path, "markdown.path") ??
+          validatePathValue(homeToml.markdown?.path, "markdown.path"));
 
-  const backend =
-    overrides.backend ??
-    env.TASKS_AXI_BACKEND ??
-    projectToml.backend ??
-    homeToml.backend ??
-    "markdown";
-
-  const path = resolveMarkdownPath(explicitPath, tomlPath, cwd);
+  const path = resolveStorePath(backend, explicitPath, tomlPath, cwd, home);
 
   const archive =
     projectToml.markdown?.archive !== undefined

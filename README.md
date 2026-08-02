@@ -229,7 +229,7 @@ Single-task `mv` has the same protection; use multi-task `mv` to move its active
 ## Configuration
 
 Backend and path are resolved in this order: `--backend` / `--file` flags passed after the command, then `TASKS_AXI_BACKEND` / `TASKS_AXI_FILE` env, then a project `.tasks.toml`, then `~/.tasks-axi/config.toml`, then the defaults.
-Without an explicit path, tasks-axi uses `backlog.md` when present, then `data/backlog.md` when present, and otherwise targets `backlog.md` for future writes.
+Without an explicit path, the markdown backend uses `backlog.md` when present, then `data/backlog.md` when present, and otherwise targets `backlog.md` for future writes; the beads backend's default is covered below.
 
 ```toml
 # .tasks.toml in the project root
@@ -244,15 +244,40 @@ done_keep = 10
 `archive` is optional; when omitted, pruned tasks are appended to `done-archive.md` next to the active backlog.
 Body replacements with `--archive-body` append superseded bodies to `note-archive.md` next to the active backlog.
 
+To source a [beads](https://github.com/gastownhall/beads) store instead:
+
+```toml
+# .tasks.toml in the project root
+backend = "beads"
+
+[beads]
+path = "/path/to/store/.beads"
+```
+
+Without an explicit path, the beads backend targets `~/data/tasks/.beads`.
+
 ## Backends
 
-P1 ships the **markdown** backend only, behind a narrow `Store` interface so additional backends slot in without touching the CLI layer.
+The markdown backend is read/write; the beads backend is read/write for status changes, with issue creation/removal and dependency edits staying on the `bd` CLI. Both sit behind the same narrow `Store` interface so additional backends slot in without touching the CLI layer.
 
-| Backend                | Status  |
-| ---------------------- | ------- |
-| markdown               | shipped |
-| sqlite                 | planned |
-| github / jira / linear | planned |
+| Backend                | Status                        |
+| ---------------------- | ----------------------------- |
+| markdown               | shipped, read/write           |
+| beads                  | shipped, read/write (partial) |
+| sqlite                 | planned                       |
+| github / jira / linear | planned                       |
+
+The beads backend shells out to the `bd` CLI (it must be on `PATH`) with `BEADS_DIR` pointed at the resolved store path, and `BD_NAME` read from that store's own `config.yaml`.
+
+It supports `list`, `ready`, and `show` (read, via `bd list`/`bd show --json`), plus `start`, `done`, `reopen`, `hold`, `unhold`, and `update --title/--body/--kind/--priority/--pr/--report` — all of which persist to the beads store via `bd update <id> ...`. `add` (create), `rm` (remove), `block`/`unblock` (dependency edits), and public-followup mutations stay out of scope and raise a structured `UNSUPPORTED` error — use `bd`/`task` directly for those. `--repo` also raises `UNSUPPORTED` on both read and write (beads issues have no repo concept).
+
+The mapping between tasks-axi's model and beads' is lossy in a few documented ways:
+
+- **State/hold.** A beads issue with status `deferred` or `pinned` is surfaced as `queued` with an active hold (`kind: future` / `kind: parked`), so it never shows up in `ready`. Any other status outside the recognized set (beads' built-in `blocked`, or a custom status configured via `status.custom`) is also surfaced as `queued` with an active `kind: captain` hold, rather than falling through to plain `queued`, so unreadiness in beads is never silently lost. Writing a hold only supports the `future`/`parked` kinds, since they're the only ones with a beads status counterpart; other `HoldKind`s (`captain`/`external`/`load`) raise `UNSUPPORTED` on write. `hold --until` is only honored for `kind: future` (beads' `deferred` status is the only one that carries a date via `--defer`).
+- **Links.** `pr`/`report`/`doc` links (e.g. from `done --pr <url>`) round-trip through beads' `metadata` object as `tasks_axi_<kind>` keys. This is last-write-wins per kind, not a list — beads has no native multi-link field.
+- **Body archiving.** `update --body --archive-body` has no separate archive file in beads; the outgoing body is appended to the issue's `notes` via `--append-notes` before the description is replaced.
+
+tasks-axi sources one backend at a time today; running both the markdown backlog and a beads store side by side means invoking tasks-axi twice with different `--backend`/`--file` flags. A true merged multi-source view (one `list` spanning both backends at once) is a tracked follow-up, not yet implemented.
 
 ## Development
 

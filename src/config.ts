@@ -48,6 +48,11 @@ export interface ResolvedConfig {
     bin?: string;
     /** Issue-id prefix of the workspace; when set, other ids are rejected. */
     prefix?: string;
+    /**
+     * Scope label: only beads carrying it are visible, and new tasks get it.
+     * Lets one tasks-axi backlog live inside a shared store.
+     */
+    label?: string;
     /** How long a mutation waits on another's lock, in ms (default 30000). */
     lockTimeoutMs?: number;
   };
@@ -74,6 +79,7 @@ interface TomlConfig {
     bin?: string;
     binary?: string;
     prefix?: string;
+    label?: string;
     lock_timeout_ms?: number;
   };
 }
@@ -142,7 +148,8 @@ export function parseConfigToml(src: string): TomlConfig {
         key === "path" ||
         key === "bin" ||
         key === "binary" ||
-        key === "prefix"
+        key === "prefix" ||
+        key === "label"
       ) {
         config.beads[key] = requireTomlString(value, source);
       }
@@ -199,6 +206,7 @@ function configKeySource(table: ConfigTable, key: string): string | undefined {
       key === "bin" ||
       key === "binary" ||
       key === "prefix" ||
+      key === "label" ||
       key === "lock_timeout_ms")
   ) {
     return `beads.${key}`;
@@ -348,7 +356,7 @@ function resolveBeadsConfig(
   home: string,
 ): ResolvedConfig["beads"] | undefined {
   const pick = (
-    key: "dir" | "bin" | "prefix",
+    key: "dir" | "bin" | "prefix" | "label",
     alias: "path" | "binary" | undefined,
   ): { value: string; source: string } | undefined => {
     for (const toml of [projectToml, homeToml]) {
@@ -376,6 +384,8 @@ function resolveBeadsConfig(
   }
   const prefix = pick("prefix", undefined);
   if (prefix) beads.prefix = validatePrefix(prefix.value);
+  const label = pick("label", undefined);
+  if (label) beads.label = validateLabel(label.value);
   const lockTimeout =
     projectToml.beads?.lock_timeout_ms ?? homeToml.beads?.lock_timeout_ms;
   if (lockTimeout !== undefined) {
@@ -389,6 +399,18 @@ function resolveBeadsConfig(
     beads.lockTimeoutMs = lockTimeout;
   }
   return Object.keys(beads).length > 0 ? beads : undefined;
+}
+
+function validateLabel(value: string): string {
+  const label = value.trim();
+  if (label === "" || /[\s,]/.test(label)) {
+    throw new AxiError(
+      "beads.label must be a single bd label with no spaces or commas",
+      "VALIDATION_ERROR",
+      ['Set `[beads] label = "src:my-backlog"` in .tasks.toml, or remove the key'],
+    );
+  }
+  return label;
 }
 
 function validatePrefix(value: string): string {

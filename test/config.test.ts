@@ -283,6 +283,20 @@ describe("resolveConfig", () => {
     );
   });
 
+  it("reads the beads scope label and rejects an invalid one", () => {
+    writeFileSync(
+      join(dir, ".tasks.toml"),
+      '[beads]\nlabel = "src:macbook-ops-backlog"\n',
+    );
+    expect(resolveConfig({ cwd: dir, home, env: {} }).beads?.label).toBe(
+      "src:macbook-ops-backlog",
+    );
+    writeFileSync(join(dir, ".tasks.toml"), '[beads]\nlabel = "has space"\n');
+    expect(() => resolveConfig({ cwd: dir, home, env: {} })).toThrow(
+      /beads.label/,
+    );
+  });
+
   it("reads beads lock_timeout_ms, project over home", () => {
     mkdirSync(join(home, ".tasks-axi"), { recursive: true });
     writeFileSync(

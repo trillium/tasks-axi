@@ -48,6 +48,7 @@ function createStore(config: ResolvedConfig): Store {
       ...(config.beads?.dir ? { dir: config.beads.dir } : {}),
       ...(config.beads?.bin ? { bin: config.beads.bin } : {}),
       ...(config.beads?.prefix ? { prefix: config.beads.prefix } : {}),
+      ...(config.beads?.label ? { label: config.beads.label } : {}),
       ...(config.beads?.lockTimeoutMs !== undefined
         ? { lockTimeoutMs: config.beads.lockTimeoutMs }
         : {}),

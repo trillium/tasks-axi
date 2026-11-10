@@ -60,7 +60,7 @@ Not verified: any run against the live `task` or `brain` stores, and latency aga
 
 Switching `data/backlog.md` to beads is a deliberate migration, not a config flip. It needs:
 
-1. **A decision on which store.** Pointing at the `task` store makes every existing `task-*` issue show up in `tasks-axi list` and the dashboard (native beads read as queued tasks, with bd's priority and type). A dedicated backlog store avoids mixing the two.
+1. **A decision on which store.** Pointing at the `task` store makes every existing `task-*` issue show up in `tasks-axi list` and the dashboard (native beads read as queued tasks, with bd's priority and type). Set `[beads] label = "<label>"` to scope tasks-axi to the beads carrying that label (new tasks get it), or use a dedicated backlog store.
 2. **An id mapping.** Backlog ids are free-form slugs such as `tasks-axi-beads-build-20261110`. With `prefix = "task"` they are rejected. Without a prefix, ids are forced into a store whose prefix differs, and bd's own `ready` then mis-reads blockers (tasks-axi derives `ready` itself, so it stays correct). Either re-id the items or use a store whose prefix fits. Status files, briefs and branches that refer to backlog ids would need the same mapping.
 3. **A one-off importer.** There is none. The 39 current items (state, kind, repo, holds, dependencies with reasons, bodies, dates) would be replayed through `tasks-axi add` / `block` / `hold` / `done` against the beads store. Not written.
 4. **No public-followup or multi-id `mv`.** The beads backend does not support either. Anything that calls `tasks-axi public-followup` or `mv <id>... --to` on the backlog stops working after the switch.

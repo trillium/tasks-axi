@@ -960,6 +960,100 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore id prefix", () => {
   );
 });
 
+describe.skipIf(!BD_AVAILABLE)("BeadsStore label scope", () => {
+  let bl: TempBeadsBacklog;
+  const bd = (...args: string[]): string =>
+    execFileSync("bd", args, {
+      cwd: bl.dir,
+      env: { ...process.env, BEADS_DIR: join(bl.dir, ".beads") },
+      encoding: "utf8",
+    });
+  beforeAll(() => {
+    bl = makeBeadsBacklog();
+  }, HOOK_TIMEOUT);
+  afterAll(() => bl.cleanup());
+
+  it(
+    "only sees labelled beads and labels what it creates",
+    async () => {
+      bd(
+        "create",
+        "--title",
+        "unrelated native",
+        "--id",
+        "ls-native",
+        "--force",
+        "--silent",
+      );
+      const scoped = new BeadsStore({
+        dir: bl.dir,
+        label: "src:scope-test",
+        now: () => "2026-07-01",
+      });
+      expect((await scoped.list({})).total).toBe(0);
+      expect(await scoped.get("ls-native")).toBeNull();
+
+      await scoped.create({ id: "ls-one", title: "scoped one" });
+      await scoped.create({
+        id: "ls-two",
+        title: "scoped two",
+        deps: [{ type: "blocked-by", id: "ls-one" }],
+      });
+      expect((await scoped.list({})).items.map((t) => t.id)).toEqual([
+        "ls-one",
+        "ls-two",
+      ]);
+      expect(JSON.parse(bd("show", "ls-one", "--json"))[0].labels).toContain(
+        "src:scope-test",
+      );
+
+      // The unscoped store sees everything; the scoped one never sees
+      // ls-native, so it cannot target it either.
+      expect((await bl.store.list({})).total).toBe(3);
+      await expect(
+        scoped.transition("ls-native", "done"),
+      ).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(
+        JSON.parse(bd("show", "ls-native", "--json"))[0].status,
+      ).toBe("open");
+
+      // A blocker outside the scope does not count as an existing task.
+      await expect(
+        scoped.create({
+          id: "ls-three",
+          title: "x",
+          deps: [{ type: "blocked-by", id: "ls-native" }],
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "keeps its mirror to the scoped tasks",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "tasks-axi-label-mirror-"));
+      try {
+        const mirror = join(dir, "backlog.md");
+        const scoped = new BeadsStore({
+          dir: bl.dir,
+          label: "src:scope-test",
+          mirrorPath: mirror,
+          now: () => "2026-07-01",
+        });
+        await scoped.transition("ls-one", "in_flight");
+        const text = readFileSync(mirror, "utf8");
+        expect(text).toContain("ls-one");
+        expect(text).toContain("ls-two");
+        expect(text).not.toContain("ls-native");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    IT_TIMEOUT,
+  );
+});
+
 describe.skipIf(!BD_AVAILABLE)("BeadsStore native beads", () => {
   let bl: TempBeadsBacklog;
   const bd = (...args: string[]): string =>

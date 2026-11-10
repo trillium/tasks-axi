@@ -271,6 +271,7 @@ backend = "beads"
 dir = "data"               # directory holding .beads/ (alias: path; a path ending in .beads is accepted too)
 bin = "bd"                 # bd binary or wrapper command (alias: binary)
 prefix = "proj"            # issue-id prefix of the workspace; other ids are rejected
+label = "src:my-backlog"   # scope: only beads with this label are visible, new tasks get it
 lock_timeout_ms = 30000    # how long a mutation waits for another's lock
 
 [markdown]
@@ -280,6 +281,7 @@ path = "data/backlog.md"   # optional read-only mirror (see below)
 Every `[beads]` key is optional.
 `bin` can be any executable that speaks bd's CLI, so a launcher script that pins its own workspace (for example by exporting `BEADS_DIR` and then `exec bd "$@"`) works with `dir` unset; tasks-axi then sets no `cwd` or `BEADS_DIR` and leaves workspace selection to the wrapper.
 With `prefix` set, a task id outside `<prefix>-` is rejected up front instead of being forced past bd's own prefix check; with no prefix, ids are forced as before.
+With `label` set, the backend lists only beads carrying that label (`bd list --label`) and attaches it to every task it creates, so one backlog can live inside a shared store: unlabelled beads are never read, counted, mirrored or modified, and a dependency on one is rejected as not found. Beads created before the label was set must be labelled (`bd label add`) to appear.
 Issues created outside tasks-axi still read naturally: bd's priority (0-4), a non-`task` issue type as the task kind, and its created/closed dates are surfaced when an issue has no `tasks_axi` metadata, and `done` records the PR link (or `Closed`) as bd's close reason.
 
 When `[markdown] path` (or `--file` / `TASKS_AXI_FILE`) is set, after every mutation the backend rewrites that path as a **read-only canonical mirror** of the active backlog, byte-compatible with the markdown backend's format, so tools that read `backlog.md` directly keep working unchanged.

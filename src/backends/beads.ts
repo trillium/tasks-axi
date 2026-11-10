@@ -114,6 +114,13 @@ export interface BeadsStoreOptions {
    */
   prefix?: string;
   /**
+   * Scope label. When set, only beads carrying it are listed, and `create`
+   * attaches it to every new bead, so one backlog can share a store with
+   * unrelated beads. Existing beads without the label are invisible: they are
+   * never read, counted, mirrored or touched.
+   */
+  label?: string;
+  /**
    * Where pruned Done items are archived (default `<mirror dir>/done-archive.md`
    * with a mirror, otherwise none).
    */
@@ -275,6 +282,7 @@ export class BeadsStore implements Store {
   private readonly mirrorPath?: string;
   private readonly bin: string;
   private readonly prefix?: string;
+  private readonly label?: string;
   private readonly archivePath?: string;
   private readonly noteArchivePath?: string;
   private readonly lockPath: string;
@@ -288,6 +296,7 @@ export class BeadsStore implements Store {
     this.mirrorPath = options.mirrorPath;
     this.bin = options.bin ?? "bd";
     this.prefix = options.prefix;
+    this.label = options.label;
     const mirrorDir = options.mirrorPath
       ? dirname(options.mirrorPath)
       : undefined;
@@ -464,7 +473,14 @@ export class BeadsStore implements Store {
 
   private async loadAll(): Promise<BeadsCache> {
     if (this.cache) return this.cache;
-    const raw = await this.runBd(["list", "--json", "--all", "-n", "0"]);
+    const raw = await this.runBd([
+      "list",
+      "--json",
+      "--all",
+      "-n",
+      "0",
+      ...(this.label ? ["--label", this.label] : []),
+    ]);
     let parsed: unknown;
     try {
       parsed = raw.trim() === "" ? [] : JSON.parse(raw);
@@ -843,6 +859,7 @@ export class BeadsStore implements Store {
         ...(this.prefix ? [] : ["--force"]),
         "-t",
         "task",
+        ...(this.label ? ["--labels", this.label] : []),
         "--silent",
         "--metadata",
         this.metadataArg(task),

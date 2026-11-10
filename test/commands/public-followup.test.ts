@@ -361,10 +361,164 @@ describe("public-followup commands", () => {
     }
   });
 
-  it("keeps a failed required relation actionable unless failure is expected", async () => {
+  it("accepts a Forgejo pulls URL as a pr-merged deliverable", async () => {
     const b = makeBacklog(EMPTY);
     try {
       await add(b);
+      await bind(b);
+      const landed = await acceptEvent(
+        b,
+        event("evt-forgejo-url", "rel-code", "work-code-q1", 1, {
+          deliverables: {
+            pr_url: "https://forgejo.samesies.gay/eve/orchalycious/pulls/39",
+          },
+        }),
+      );
+      expect(
+        landed.task.public_followup.work_relations[0].accepted_events[0]
+          .deliverables.pr_url,
+      ).toBe("https://forgejo.samesies.gay/eve/orchalycious/pulls/39");
+    } finally {
+      b.cleanup();
+    }
+  });
+
+  it("rejects a singular-route Forgejo PR URL before accepting work", async () => {
+    const b = makeBacklog(EMPTY);
+    try {
+      await add(b);
+      await bind(b);
+      await expect(
+        acceptEvent(
+          b,
+          event("evt-singular-url", "rel-code", "work-code-q1", 1, {
+            deliverables: {
+              pr_url: "https://forgejo.samesies.gay/eve/orchalycious/pull/39",
+            },
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    } finally {
+      b.cleanup();
+    }
+  });
+
+  it("makes a failed required relation deliverable on a pr-merged promise (option A)", async () => {
+    const b = makeBacklog(EMPTY);
+    try {
+      await add(b);
+      await bind(b);
+      const failed = await acceptEvent(
+        b,
+        event("evt-code-failed", "rel-code", "work-code-q1", 1, {
+          outcome_type: "failed",
+          deliverables: { error_code: "quota-exhausted" },
+          public_safe_outcome:
+            "This one did not pan out: the worker ran out of quota before it could open a fix.",
+        }),
+      );
+      expect(failed.task.public_followup).toMatchObject({
+        delivery: { state: "ready" },
+        work_relations: [{ state: "failed" }],
+      });
+
+      const ready = JSON.parse(await run(b, "ready", ["--json"])) as Record<
+        string,
+        any
+      >;
+      expect(ready.count).toBe(1);
+      expect(ready.ready_public_followups[0].id).toBe("public-final-ab");
+
+      const begun = await begin(b);
+      expect(begun.task.public_followup.delivery.state).toBe(
+        "delivery-posting",
+      );
+
+      const delivered = JSON.parse(
+        await run(b, "record-delivery", [
+          "public-final-ab",
+          "--receipt-file",
+          jsonFile(b, "failed-receipt.json", receipt()),
+          "--json",
+        ]),
+      ) as Record<string, any>;
+      expect(delivered.task.state).toBe("done");
+      expect(delivered.task.public_followup.delivery.state).toBe("posted");
+      expect(
+        delivered.task.public_followup.work_relations[0].accepted_events[0]
+          .public_safe_outcome,
+      ).toBe(
+        "This one did not pan out: the worker ran out of quota before it could open a fix.",
+      );
+    } finally {
+      b.cleanup();
+    }
+  });
+
+  it("upgrades a backlog persisted before option A instead of refusing to read it", async () => {
+    const b = makeBacklog(EMPTY);
+    try {
+      await add(b);
+      await bind(b);
+      await acceptEvent(
+        b,
+        event("evt-code-failed", "rel-code", "work-code-q1", 1, {
+          outcome_type: "failed",
+          deliverables: { error_code: "quota-exhausted" },
+          public_safe_outcome: "This one did not pan out.",
+        }),
+      );
+
+      const source = b.read();
+      const match =
+        /<!-- tasks-axi:public-followup\/v1:([A-Za-z0-9_-]+) -->/.exec(source);
+      expect(match).not.toBeNull();
+      const encoded = match![1];
+      const persisted = JSON.parse(
+        Buffer.from(encoded, "base64url").toString("utf8"),
+      ) as Record<string, any>;
+      expect(persisted.delivery.state).toBe("ready");
+      persisted.delivery.state = "pending-work";
+      writeFileSync(
+        b.path,
+        source.replace(
+          encoded,
+          Buffer.from(JSON.stringify(persisted), "utf8").toString("base64url"),
+        ),
+        "utf8",
+      );
+
+      const upgraded = await b.store.get("public-final-ab");
+      expect(upgraded?.public_followup?.delivery.state).toBe("ready");
+
+      const ready = JSON.parse(await run(b, "ready", ["--json"])) as Record<
+        string,
+        any
+      >;
+      expect(ready.count).toBe(1);
+      expect(ready.ready_public_followups[0].id).toBe("public-final-ab");
+
+      const begun = await begin(b);
+      expect(begun.task.public_followup.delivery.state).toBe(
+        "delivery-posting",
+      );
+    } finally {
+      b.cleanup();
+    }
+  });
+
+  it("keeps a failure-outcome obligation delivering exactly as before", async () => {
+    const b = makeBacklog(EMPTY);
+    try {
+      await add(
+        b,
+        "public-final-ab",
+        request(),
+        expected({
+          type: "failure-outcome",
+          required_deliverables: ["error_code"],
+        }),
+      );
       await bind(b);
       const failed = await acceptEvent(
         b,
@@ -375,14 +529,60 @@ describe("public-followup commands", () => {
         }),
       );
       expect(failed.task.public_followup).toMatchObject({
-        delivery: { state: "pending-work" },
+        delivery: { state: "ready" },
         work_relations: [{ state: "failed" }],
       });
-      const ready = JSON.parse(await run(b, "ready", ["--json"])) as Record<
-        string,
-        any
-      >;
-      expect(ready.count).toBe(0);
+    } finally {
+      b.cleanup();
+    }
+  });
+
+  it("still delivers a landed pr-merged relation with its landed text", async () => {
+    const b = makeBacklog(EMPTY);
+    try {
+      await add(b);
+      await bind(b);
+      const landed = await acceptEvent(b);
+      expect(landed.task.public_followup).toMatchObject({
+        delivery: { state: "ready" },
+        work_relations: [{ state: "landed" }],
+      });
+      expect(
+        landed.task.public_followup.work_relations[0].accepted_events[0]
+          .public_safe_outcome,
+      ).toBe("The fix merged in PR 519.");
+    } finally {
+      b.cleanup();
+    }
+  });
+
+  it("leaves superseded relation behavior unchanged when a failed generation lands later", async () => {
+    const b = makeBacklog(EMPTY);
+    try {
+      await add(b);
+      await bind(b);
+      const successor = relation("rel-code-v2", "work-code-v2", 2);
+      await run(b, "supersede-work", [
+        "public-final-ab",
+        "--relation",
+        "rel-code",
+        "--successor-file",
+        jsonFile(b, "supersede-successor.json", successor),
+        "--json",
+      ]);
+      const failed = await acceptEvent(
+        b,
+        event("evt-v2-failed", "rel-code-v2", "work-code-v2", 2, {
+          outcome_type: "failed",
+          deliverables: { error_code: "build-failed" },
+          public_safe_outcome: "The retry also failed.",
+        }),
+      );
+      expect(failed.task.public_followup.work_relations).toMatchObject([
+        { relation_id: "rel-code", state: "superseded" },
+        { relation_id: "rel-code-v2", state: "failed" },
+      ]);
+      expect(failed.task.public_followup.delivery.state).toBe("ready");
     } finally {
       b.cleanup();
     }

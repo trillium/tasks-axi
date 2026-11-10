@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.6](https://github.com/kunchenguid/tasks-axi/compare/tasks-axi-v0.2.5...tasks-axi-v0.2.6) (2026-09-22)
+
+
+### Bug Fixes
+
+* **cli:** accept canonical Forgejo pull request URLs ([#36](https://github.com/kunchenguid/tasks-axi/issues/36)) ([9a86c7c](https://github.com/kunchenguid/tasks-axi/commit/9a86c7c86a4617a5a4f00f28dcb9588b03897f8f))
+* make failed public follow-ups deliverable ([#67](https://github.com/kunchenguid/tasks-axi/issues/67)) ([603c901](https://github.com/kunchenguid/tasks-axi/commit/603c9018fb08859675b28e5e3816906c2b74561c))
+* make the generated skill defer to live CLI guidance ([#48](https://github.com/kunchenguid/tasks-axi/issues/48)) ([d9175b6](https://github.com/kunchenguid/tasks-axi/commit/d9175b6d083d693c5b6ca21652454d52e4b312d9))
+
+## [0.2.5](https://github.com/kunchenguid/tasks-axi/compare/tasks-axi-v0.2.4...tasks-axi-v0.2.5) (2026-08-07)
+
+
+### Bug Fixes
+
+* **cli:** speed up standalone version queries ([#34](https://github.com/kunchenguid/tasks-axi/issues/34)) ([92911b2](https://github.com/kunchenguid/tasks-axi/commit/92911b2e0cc4ddfd6bafee977cca369bab7e165c))
+
 ## [0.2.4](https://github.com/kunchenguid/tasks-axi/compare/tasks-axi-v0.2.3...tasks-axi-v0.2.4) (2026-07-23)
 
 

@@ -93,6 +93,7 @@ tasks-axi add lavish-foo-q9 "fix summary toggle" --kind ship --repo lavish-axi -
 # move through the workflow
 tasks-axi start firstmate-lease-adopt
 tasks-axi done sm-idle-handoff-q8 --pr https://github.com/owner/repo/pull/42
+tasks-axi done fj-task-q1 --pr https://forgejo.example.com/owner/repo/pulls/39
 tasks-axi reopen some-task
 
 # dependencies, holds, and the ready queue
@@ -167,7 +168,9 @@ A posted receipt file records `state=posted`, request id, platform, attempt and 
 Its attempt count must exactly match the currently recorded delivery attempt, including late receipts that reconcile that same attempt from `unknown` or `partial`.
 An error file records the current attempt count, a safe delivery state, validated error code, occurrence time, optional retry time, and optional chunk counts.
 Its attempt count must exactly match the currently recorded delivery attempt, and stale or future-attempt errors fail without mutation.
-Expected-final types permit only their matching safe deliverables: `pr_url`, `report_path`, `commit_sha`, or `error_code`.
+Events that match the expected-final type permit only its matching safe deliverables: `pr_url`, `report_path`, `commit_sha`, or `error_code`; a failed event on another expected-final type may instead carry at most one safe `error_code`.
+A required relation whose bound work reports `failed` is terminal and deliverable for any expected-final type, not only `failure-outcome`: the accepted event's `public_safe_outcome` is the honest text to deliver.
+An obligation an older version parked in `pending-work` because its failed relation was not yet deliverable is read back as `ready`; any other stale `delivery.state` is still a hard validation error.
 Run `tasks-axi public-followup --help` for the exact file-backed command surface and state names.
 
 Each mutation is idempotent and returns the monotonic obligation `revision`, changed fields, and complete typed payload under `--json`.
@@ -289,7 +292,7 @@ pnpm lint          # eslint
 pnpm run build:skill -- --check   # fail if the generated skill is stale
 ```
 
-The installable skill is generated from the same description and help the CLI prints, so it can never drift.
+The generated installable skill is intentionally minimal and points agents to the live CLI for all commands, flags, and workflows. CLI output remains the single source of truth.
 
 ## Contributing
 

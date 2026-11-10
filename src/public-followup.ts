@@ -1,4 +1,5 @@
 import { AxiError } from "./errors.js";
+import { isPrUrl } from "./pr-url.js";
 
 export const PUBLIC_FOLLOWUP_KIND = "public-followup";
 export const PUBLIC_FOLLOWUP_SCHEMA_VERSION = 1 as const;
@@ -209,7 +210,6 @@ const SHA256_RE = /^[a-f0-9]{64}$/;
 const DELIVERABLE_NAME_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const SAFE_CODE_RE = /^[a-z][a-z0-9._-]{0,63}$/;
 const PROJECT_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$/;
-const PR_URL_RE = /^https:\/\/[^?#\s]+\/pull\/\d+$/;
 const REPORT_PATH_RE = /^data\/[A-Za-z0-9][A-Za-z0-9._-]*\/report\.md$/;
 const COMMIT_SHA_RE = /^[a-f0-9]{7,64}$/;
 const MAX_ENCODED_METADATA_LENGTH = 1_000_000;
@@ -1105,7 +1105,10 @@ export function normalizePublicFollowup(
     validation(`${path}.delivery.state is stale: work is not ready`);
   }
   if (normalized.delivery.state === "pending-work" && derivedReady) {
-    validation(`${path}.delivery.state is stale: work is ready`);
+    if (isPublicFollowupReady(normalized, false)) {
+      validation(`${path}.delivery.state is stale: work is ready`);
+    }
+    normalized.delivery.state = "ready";
   }
   if (
     normalized.delivery.state === "intent" &&
@@ -1367,15 +1370,7 @@ function deliverablesAreSafeForExpected(
     return false;
   }
   for (const [name, value] of Object.entries(deliverables)) {
-    if (name === "pr_url") {
-      if (!PR_URL_RE.test(value)) return false;
-      try {
-        const url = new URL(value);
-        if (url.username !== "" || url.password !== "") return false;
-      } catch {
-        return false;
-      }
-    }
+    if (name === "pr_url" && !isPrUrl(value)) return false;
     if (name === "report_path" && !REPORT_PATH_RE.test(value)) return false;
     if (name === "commit_sha" && !COMMIT_SHA_RE.test(value)) return false;
     if (name === "error_code" && !SAFE_CODE_RE.test(value)) return false;
@@ -1444,20 +1439,28 @@ export function validateWorkEventContract(
 function relationLanded(
   relation: WorkRelation,
   expected: ExpectedFinal,
+  failedIsTerminal = true,
 ): boolean {
   const event = relation.accepted_events.at(-1);
-  const terminalState =
-    relation.state === "landed" ||
-    (relation.state === "failed" && expected.type === "failure-outcome");
-  return (
-    terminalState &&
-    event !== undefined &&
-    eventMatchesExpected(event, expected)
-  );
+  if (event === undefined) return false;
+  if (relation.state === "landed") {
+    return eventMatchesExpected(event, expected);
+  }
+  if (relation.state === "failed") {
+    return expected.type === "failure-outcome"
+      ? eventMatchesExpected(event, expected)
+      : failedIsTerminal &&
+          event.outcome_type === "failed" &&
+          failureDeliverablesAreSafe(event.deliverables);
+  }
+  return false;
 }
 
 /** Derived public-delivery readiness, intentionally separate from worker dispatch readiness. */
-export function isPublicFollowupReady(value: PublicFollowup): boolean {
+export function isPublicFollowupReady(
+  value: PublicFollowup,
+  failedIsTerminal = true,
+): boolean {
   const active = value.work_relations.filter(
     (relation) => relation.state !== "superseded",
   );
@@ -1466,17 +1469,20 @@ export function isPublicFollowupReady(value: PublicFollowup): boolean {
   if (fulfilling.length === 0) return false;
   const required = active.filter((relation) => relation.required);
   if (
-    required.some((relation) => !relationLanded(relation, value.expected_final))
+    required.some(
+      (relation) =>
+        !relationLanded(relation, value.expected_final, failedIsTerminal),
+    )
   ) {
     return false;
   }
   if (value.expected_final.completion_policy === "all-required") {
     return fulfilling.every((relation) =>
-      relationLanded(relation, value.expected_final),
+      relationLanded(relation, value.expected_final, failedIsTerminal),
     );
   }
   return fulfilling.some((relation) =>
-    relationLanded(relation, value.expected_final),
+    relationLanded(relation, value.expected_final, failedIsTerminal),
   );
 }
 

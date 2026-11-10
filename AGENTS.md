@@ -11,12 +11,13 @@ The CLI layer never knows which backend is active — it only talks to the `Stor
 - `src/context.ts` — `resolveTasksContext` builds the backend `Store` + `ResolvedConfig`; every command receives this `TasksContext`.
 - `src/store.ts` - the `Store` interface and `Capabilities`. Core contract: `create/get/update/remove/list/transition/addDep/removeDep/updatePublicFollowup`. `prune`/`render` are optional and capability-gated.
 - `src/model.ts` — the `Task` data model (report §5).
+- `src/pr-url.ts` — `isPrUrl`, the one canonical PR-URL seam (GitHub `/pull/<n>` on github.com, Forgejo `/pulls/<n>` on any lowercase DNS host) shared by prose link derivation, `--pr` validation, and public-followup `pr_url`; near-misses derive as `doc` links, never `pr`.
 - `src/derive.ts` - worker `blocked` / `ready` / active `held` and public delivery readiness are derived in the CLI from `list` + the dep graph + hold date gates, never Store methods, so every backend gets them for free.
 - `src/backends/markdown*.ts` — the read/write P1 backend.
 - `src/backends/beads.ts` — sources a [beads](https://github.com/gastownhall/beads) store (default `~/data/tasks/.beads`) via the `bd` CLI (`BEADS_DIR` + `BD_NAME` read from that store's `config.yaml`). `transition` and `update` write through via `bd update <id> --status/--title/--description/--type/--priority/--append-notes/--defer/--set-metadata` — one CLI call per mutation, covering `start`/`done`/`reopen`/`hold`/`unhold`/`update --title|--body|--kind|--priority|--pr|--report`. `create`/`remove`/`addDep`/`removeDep`/`updatePublicFollowup` all throw `unsupported` (issue lifecycle and dependency edits stay on the `bd` CLI); `--repo` throws `unsupported` on both read and write since beads issues have no repo concept. beads' `deferred`/`pinned` statuses (its "frozen" category — no backing dependency edge) map to `queued` plus an active `task.hold` (`kind: future`/`kind: parked` respectively — the only `HoldKind`s beads can represent; others throw `unsupported`, as does `hold --until` on a non-`future` kind), so derive.ts's `ready` excludes them the same way a captain-held markdown task is excluded. `open` maps explicitly to `queued` with no hold; any other status outside the recognized set (beads' built-in `blocked`, or a custom status configured via `status.custom`) maps to `queued` plus a `kind: captain` hold instead of falling through to plain `queued`, so unreadiness in beads is never silently lost. `TaskLink`s (`pr`/`report`/`doc`) round-trip through beads' `metadata` object as `tasks_axi_<kind>` keys — last-write-wins per kind, not a list. `update --body --archive-body` has no beads archive file, so the outgoing body is appended to the issue's `notes` via `--append-notes` before the description is replaced. Every `bd` invocation runs under a 30s `spawnSync` timeout (`BD_TIMEOUT_MS`) so a hung `bd`/Dolt process can't hang tasks-axi indefinitely; a timeout raises a structured error naming the timed-out command rather than the generic spawn-failure message. `get()` passes the id via `bd show --id=<id>` rather than a bare positional, defense-in-depth against an id that looks like a flag (unreachable via the CLI today since `ID_RE` already rejects it, but `BeadsStore` is a public `Store` implementation any caller could construct directly). Tests inject a fake `run` (`BeadsRunner`) instead of spawning `bd`. One backend sources at a time — no merged multi-source `list` across markdown + beads yet.
 - `src/public-followup.ts` - authoritative versioned schema, strict privacy-safe validation, canonical encoding, immutable-field checks, relation/event readiness, and terminal-state invariants for `kind=public-followup`; `src/commands/public-followup.ts` owns its dedicated CLI state machine.
 - `src/commands/*` — one file per verb group; `src/view.ts` owns the read-side TOON projection; `src/confirm.ts` owns the write-side output (the `ok:` confirmation line, the `--json` payload, and `renderMutation`, which assembles both).
-- Shared helpers copied from the family: `args.ts`, `body.ts`, `format.ts`, `fields.ts`, `toon.ts`, `suggestions.ts`, `skill.ts`.
+- Shared helpers copied from the family: `args.ts`, `body.ts`, `format.ts`, `fields.ts`, `toon.ts`, `suggestions.ts`, `skill.ts` (minimal CLI-deferring stub generator).
 
 ## Markdown grammar invariants (the hard part — do not regress)
 
@@ -67,10 +68,17 @@ The CLI layer never knows which backend is active — it only talks to the `Stor
   This lets an agent confirm a write deterministically without a follow-up read.
   Errors still use structured-error output + non-zero exit (not JSON), so `exit 0` + `ok:true` = success.
 
+## Entry point & the `--version` fast path
+
+`bin/tasks-axi.ts` answers a bare `-v`/`-V`/`--version` through `axi-sdk-js/fast-path` and only then `await import`s `src/cli.js`, so the heavy command graph never loads for a version query (~31ms -> ~20ms, the node floor).
+That makes `src/version.ts` a **leaf**: it may import node builtins and nothing else - importing anything from the command graph silently destroys the speedup. `cli.ts` re-imports `VERSION` from it, so there is still one source of the version string.
+Any argv shape other than exactly one version flag falls through to `runAxiCli`, which remains the sole owner of the general case (e.g. `list --version` is still an unknown-flag error).
+`test/bin/version-fast-path.test.ts` guards this deterministically with an ESM loader module trace (`test/fixtures/module-trace-*.mjs`) plus a negative control; do **not** add a wall-clock timing assertion to CI - it is flaky under runner contention.
+
 ## Build / test / ship
 
-- `pnpm build` (tsc), `pnpm test` (vitest, `test/` mirrors `src/`), `pnpm lint` (eslint), `pnpm run build:skill -- --check` (the generated `skills/tasks-axi/SKILL.md` is built from `DESCRIPTION` + `TOP_HELP` and must not drift — CI runs the check).
-- `skills/tasks-axi/SKILL.md` is generated — regenerate with `pnpm run build:skill` after changing the description or top-level help; never hand-edit it.
+- `pnpm build` (tsc), `pnpm test` (vitest, `test/` mirrors `src/`), `pnpm lint` (eslint), `pnpm run build:skill -- --check` (CI fails if `skills/tasks-axi/SKILL.md` drifts from `src/skill.ts`).
+- The shipped skill stays **minimal** and **defers to the CLI** for all actual guidance. Frontmatter (name/description/metadata) is the discovery surface; the body only says what tasks-axi is, when to reach for it, and pointers to `npx -y tasks-axi` (dashboard), `npx -y tasks-axi --help`, and `npx -y tasks-axi <command> --help`. tasks-axi CLI output is the single source of truth. Never re-duplicate CLI-owned commands, flags, or workflow steps into the skill - prefer a pointer. Never hand-edit `skills/tasks-axi/SKILL.md`; regenerate with `pnpm run build:skill`.
 - This repo is no-mistakes-gated; ship through `/no-mistakes`.
 
 ### Release & packaging (mirrors the `*-axi` siblings)
@@ -82,6 +90,8 @@ The CLI layer never knows which backend is active — it only talks to the `Stor
   In a fresh clone, run `pnpm install --frozen-lockfile` before manual pack or publish.
   Verify with `npm pack --dry-run` (no source/test cruft; bin is `dist/bin/tasks-axi.js` with its shebang preserved by tsc).
 - **CI is a 3-OS matrix** (ubuntu/macos/windows) running install → build → lint → test → `build:skill --check`. The `Require no-mistakes` and `Guard generated files` checks gate every PR to `main`.
+- **The `Require no-mistakes` gate is a thin caller of a shared composite action.** `.github/workflows/no-mistakes-required.yml` delegates enforcement to `kunchenguid/no-mistakes/.github/actions/require-no-mistakes`, pinned to an immutable commit SHA and never `@main` (main is editable by the very PR the gate judges). Enforcement logic and its tests live upstream in the no-mistakes repo - change enforcement there rather than hand-copying a script between siblings, and bump this repo's pin in a deliberate separate PR. This repo still owns its `on:`, `paths-ignore`, `concurrency`, `permissions`, job name, and author-exemption `if:`.
+- The shared action binds the attestation to the PR's current head, so a PR whose body no-mistakes did not rewrite for that head goes red. That is the attestation contract, not a flake: push through `git push no-mistakes` so the body is refreshed. `on.pull_request.types` deliberately omits `synchronize` - the verdict is a pure function of the PR body, and a push-triggered run pins a failure to a head whose body the same pipeline run is about to fix.
 
 ## Follow-ups (out of P1 scope)
 

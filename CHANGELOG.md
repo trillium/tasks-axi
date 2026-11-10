@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.3.0](https://github.com/trillium/tasks-axi/compare/tasks-axi-v0.2.6...tasks-axi-v0.3.0) (2026-11-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **commands:** tasks-axi update no longer accepts --append. Agents must inspect the current body and replace it with --body or --body-file, optionally passing --archive-body to preserve the superseded body in note-archive.md.
+
+### Features
+
+* add durable public follow-up obligations ([#16](https://github.com/trillium/tasks-axi/issues/16)) ([d7845d3](https://github.com/trillium/tasks-axi/commit/d7845d3b3dc1cbf084909e127c1a65f3abac2fce))
+* add markdown-backed tasks-axi CLI ([#1](https://github.com/trillium/tasks-axi/issues/1)) ([239b320](https://github.com/trillium/tasks-axi/commit/239b32046222c1e176390e592f28232f2dc69684))
+* add structured task holds ([#8](https://github.com/trillium/tasks-axi/issues/8)) ([0f283ed](https://github.com/trillium/tasks-axi/commit/0f283ed3d988a7ecd9cd12d325ac4b5f4f68007b))
+* **backends:** add beads backend with write-through for status changes ([#1](https://github.com/trillium/tasks-axi/issues/1)) ([910c4da](https://github.com/trillium/tasks-axi/commit/910c4da86603face52d44a136cc0d322a22d5275))
+* **backends:** round-trip firstmate backlog format ([#4](https://github.com/trillium/tasks-axi/issues/4)) ([891555c](https://github.com/trillium/tasks-axi/commit/891555ccb7e694e359ab9b2c0f70f5f2af3c065d))
+* **cli:** add confirmation-forward mutation output ([#6](https://github.com/trillium/tasks-axi/issues/6)) ([6d39143](https://github.com/trillium/tasks-axi/commit/6d39143e14bfef6711a31371129343b23f97bf0e))
+* **commands:** replace append notes with body replacement archival ([#10](https://github.com/trillium/tasks-axi/issues/10)) ([a7993d2](https://github.com/trillium/tasks-axi/commit/a7993d2a8e8b56f1f66d125fd057de1587b62c80))
+* move linked task sets atomically ([#13](https://github.com/trillium/tasks-axi/issues/13)) ([f75ebbd](https://github.com/trillium/tasks-axi/commit/f75ebbd9faf92c1eb4cc8aa958ad5f37607ea677))
+
+
+### Bug Fixes
+
+* **cli:** accept canonical Forgejo pull request URLs ([#36](https://github.com/trillium/tasks-axi/issues/36)) ([9a86c7c](https://github.com/trillium/tasks-axi/commit/9a86c7c86a4617a5a4f00f28dcb9588b03897f8f))
+* **cli:** speed up standalone version queries ([#34](https://github.com/trillium/tasks-axi/issues/34)) ([92911b2](https://github.com/trillium/tasks-axi/commit/92911b2e0cc4ddfd6bafee977cca369bab7e165c))
+* execute every PR body compliance event ([#22](https://github.com/trillium/tasks-axi/issues/22)) ([ce32241](https://github.com/trillium/tasks-axi/commit/ce322417a186a90bfa6ff27e4e2243789166db09))
+* make failed public follow-ups deliverable ([#67](https://github.com/trillium/tasks-axi/issues/67)) ([603c901](https://github.com/trillium/tasks-axi/commit/603c9018fb08859675b28e5e3816906c2b74561c))
+* make the generated skill defer to live CLI guidance ([#48](https://github.com/trillium/tasks-axi/issues/48)) ([d9175b6](https://github.com/trillium/tasks-axi/commit/d9175b6d083d693c5b6ca21652454d52e4b312d9))
+* **markdown:** preserve blank lines in task bodies ([#11](https://github.com/trillium/tasks-axi/issues/11)) ([0229c56](https://github.com/trillium/tasks-axi/commit/0229c5611b7ab23b8ff54cf08c7ca337b508f840))
+
 ## [0.2.6](https://github.com/kunchenguid/tasks-axi/compare/tasks-axi-v0.2.5...tasks-axi-v0.2.6) (2026-09-22)
 
 

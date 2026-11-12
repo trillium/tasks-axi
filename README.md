@@ -295,6 +295,21 @@ bd stores one relationship type per task pair, so adding a `blocked-by` edge to 
 tasks-axi mutations serialize under an advisory lock (on the mirror path, or a temp file keyed to the binary and workspace when there is no mirror) and wait up to `lock_timeout_ms` (default 30 s, above one mutation) before failing closed with a `LOCKED` error, so parallel agents queue instead of retrying; raw `bd` writers bypass that lock, and `bd create --id <id> --force` silently overwrites an existing issue, so create ids through tasks-axi when both are in play.
 Public-followups and multi-task `mv` are not supported on this backend.
 
+## Running the trillium fork
+
+This fork carries a patch stack (the beads backend, label scoping, ...) on top of upstream's releases. A plain `npm update -g tasks-axi` swaps in the registry build and the beads backend disappears (`Unsupported backend "beads"`), so install and update from the fork instead.
+
+```sh
+scripts/install-fork.sh                       # build this checkout, npm i -g the tarball
+scripts/install-fork.sh --prefix ~/.local     # same, under a prefix (lnx)
+scripts/install-fork.sh --hosts "macbook mini0 mini1 mini3 lnx"   # over ssh; lnx gets --prefix $HOME/.local
+scripts/fork-drift.sh                         # per host: fork or STOCK (is dist/src/backends/beads.js there?)
+scripts/fork-upkeep.sh --check                # is there a newer upstream release tag?
+scripts/fork-upkeep.sh                        # rebase our stack onto it, build/lint/test, set version
+```
+
+`fork-upkeep.sh` versions the fork `<upstream>-trillium.<n>` (for example `0.2.7-trillium.1`). After it succeeds, review, then `git push --force-with-lease origin HEAD` and re-run `install-fork.sh --hosts ...`. `fork-drift.sh` exits non-zero if any host is not on the fork build.
+
 ## Development
 
 ```sh

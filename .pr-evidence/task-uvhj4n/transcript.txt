@@ -1,0 +1,12 @@
+$ scripts/fork-upkeep.sh --check
+upstream_tag: tasks-axi-v0.2.6
+current_version: 0.2.6
+new_upstream_release: no
+
+$ scripts/fork-drift.sh mini0 (real host)
+mini0    fork         version=0.2.6              /opt/homebrew/lib/node_modules/tasks-axi
+
+$ scripts/install-fork.sh --prefix <tmp> ; scripts/fork-drift.sh local
+added 3 packages in 551ms
+installed: 0.2.6
+local    fork         version=0.2.6              <tmp>/lib/node_modules/tasks-axi

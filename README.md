@@ -232,7 +232,7 @@ Single-task `mv` has the same protection; use multi-task `mv` to move its active
 ## Configuration
 
 Backend and path are resolved in this order: `--backend` / `--file` flags passed after the command, then `TASKS_AXI_BACKEND` / `TASKS_AXI_FILE` env, then a project `.tasks.toml`, then `~/.tasks-axi/config.toml`, then the defaults.
-Without an explicit path, the markdown backend uses `backlog.md` when present, then `data/backlog.md` when present, and otherwise targets `backlog.md` for future writes; the beads backend's default is covered below.
+Without an explicit path, tasks-axi uses `backlog.md` when present, then `data/backlog.md` when present, and otherwise targets `backlog.md` for future writes.
 
 ```toml
 # .tasks.toml in the project root
@@ -247,40 +247,68 @@ done_keep = 10
 `archive` is optional; when omitted, pruned tasks are appended to `done-archive.md` next to the active backlog.
 Body replacements with `--archive-body` append superseded bodies to `note-archive.md` next to the active backlog.
 
-To source a [beads](https://github.com/gastownhall/beads) store instead:
+## Backends
+
+Backends sit behind a narrow `Store` interface, so they slot in without touching the CLI layer.
+
+| Backend                | Status  |
+| ---------------------- | ------- |
+| markdown               | shipped |
+| beads                  | shipped |
+| sqlite                 | planned |
+| github / jira / linear | planned |
+
+### The beads backend
+
+`backend = "beads"` stores the backlog in a [beads](https://github.com/gastownhall/beads) issue database, driven through the `bd` CLI (`npm install -g @beads/bd`, then `bd init` in the workspace directory).
+Beads becomes the source of truth: dependency graph, priorities, full history, and every bd-native view (`bd show`, `bd graph`, `bd list`) work on the same tasks.
 
 ```toml
-# .tasks.toml in the project root
+# .tasks.toml
 backend = "beads"
 
 [beads]
-path = "/path/to/store/.beads"
+dir = "data"               # directory holding .beads/ (alias: path; a path ending in .beads is accepted too)
+bin = "bd"                 # bd binary or wrapper command (alias: binary)
+prefix = "proj"            # issue-id prefix of the workspace; other ids are rejected
+label = "src:my-backlog"   # scope: only beads with this label are visible, new tasks get it
+lock_timeout_ms = 30000    # how long a mutation waits for another's lock
+
+[markdown]
+path = "data/backlog.md"   # optional read-only mirror (see below)
 ```
 
-Without an explicit path, the beads backend targets `~/data/tasks/.beads`.
+Every `[beads]` key is optional.
+`bin` can be any executable that speaks bd's CLI, so a launcher script that pins its own workspace (for example by exporting `BEADS_DIR` and then `exec bd "$@"`) works with `dir` unset; tasks-axi then sets no `cwd` or `BEADS_DIR` and leaves workspace selection to the wrapper.
+With `prefix` set, a task id outside `<prefix>-` is rejected up front instead of being forced past bd's own prefix check; with no prefix, ids are forced as before.
+With `label` set, the backend lists only beads carrying that label (`bd list --label`) and attaches it to every task it creates, so one backlog can live inside a shared store: unlabelled beads are never read, counted, mirrored or modified, and a dependency on one is rejected as not found. Beads created before the label was set must be labelled (`bd label add`) to appear.
+Issues created outside tasks-axi still read naturally: bd's priority (0-4), a non-`task` issue type as the task kind, and its created/closed dates are surfaced when an issue has no `tasks_axi` metadata, and `done` records the PR link (or `Closed`) as bd's close reason.
 
-## Backends
+When `[markdown] path` (or `--file` / `TASKS_AXI_FILE`) is set, after every mutation the backend rewrites that path as a **read-only canonical mirror** of the active backlog, byte-compatible with the markdown backend's format, so tools that read `backlog.md` directly keep working unchanged.
+Hand-edits to the mirror are overwritten; mutate through tasks-axi (or `bd`, then `tasks-axi render` to refresh the mirror).
+tasks-axi fields that beads has no column for (kind, repo, holds, canonical dates, dependency reasons) live in a `tasks_axi` object inside each issue's metadata; a hold with `--until` also sets bd's defer date.
+With no mirror configured, nothing is written beside the workspace; `prune` archives surplus Done tasks to `done-archive.md` only when a mirror (or `[markdown] archive`) is set, and hides them from tasks-axi with a metadata flag while beads retains the full record.
+`--archive-body` preserves the superseded body both in `note-archive.md` (the shared file contract) and as a bd comment on the issue, so the history stays visible from bd-native views.
+`create`, `update`, and every state transition are verified by reading the task back from bd and comparing the persisted fields, so a bd invocation that exits 0 without applying the change surfaces as a structured error instead of silent divergence.
+bd stores one relationship type per task pair, so adding a `blocked-by` edge to an id that already carries a `parent` or `discovered-from` edge (or vice versa) fails with a `VALIDATION_ERROR` naming the existing edge; remove that edge first.
+`ready`/`blocked`/`held` stay derived by the CLI from the dependency graph, so they are correct even where `bd ready` itself is not (bd 1.2.2 mis-reads blockers on issues whose id prefix differs from the database prefix).
+tasks-axi mutations serialize under an advisory lock (on the mirror path, or a temp file keyed to the binary and workspace when there is no mirror) and wait up to `lock_timeout_ms` (default 30 s, above one mutation) before failing closed with a `LOCKED` error, so parallel agents queue instead of retrying; raw `bd` writers bypass that lock, and `bd create --id <id> --force` silently overwrites an existing issue, so create ids through tasks-axi when both are in play.
+Public-followups and multi-task `mv` are not supported on this backend.
 
-The markdown backend is read/write; the beads backend is read/write for status changes, with issue creation/removal and dependency edits staying on the `bd` CLI. Both sit behind the same narrow `Store` interface so additional backends slot in without touching the CLI layer.
+## Running the trillium fork
 
-| Backend                | Status                        |
-| ---------------------- | ----------------------------- |
-| markdown               | shipped, read/write           |
-| beads                  | shipped, read/write (partial) |
-| sqlite                 | planned                       |
-| github / jira / linear | planned                       |
+This fork carries a patch stack (the beads backend, label scoping, ...) on top of upstream's releases. A plain `npm update -g tasks-axi` swaps in the registry build and the beads backend disappears (`Unsupported backend "beads"`), so install and update from the fork instead.
 
-The beads backend shells out to the `bd` CLI (it must be on `PATH`) with `BEADS_DIR` pointed at the resolved store path, and `BD_NAME` read from that store's own `config.yaml`.
+```sh
+scripts/install-fork.sh                       # build this checkout, npm i -g the tarball
+scripts/install-fork.sh --prefix ~/.local     # same, under a prefix (lnx)
+scripts/install-fork.sh --hosts "macbook mini0 mini1 mini3 lnx"   # over ssh; lnx gets --prefix $HOME/.local
+scripts/fork-drift.sh                         # per host: fork or STOCK (is dist/src/backends/beads.js there?)
+scripts/fork-upkeep.sh --check                # is there a newer upstream release tag?
+scripts/fork-upkeep.sh                        # rebase our stack onto it, build/lint/test, set version
+```
 
-It supports `list`, `ready`, and `show` (read, via `bd list`/`bd show --json`), plus `start`, `done`, `reopen`, `hold`, `unhold`, and `update --title/--body/--kind/--priority/--pr/--report` — all of which persist to the beads store via `bd update <id> ...`. `add` (create), `rm` (remove), `block`/`unblock` (dependency edits), and public-followup mutations stay out of scope and raise a structured `UNSUPPORTED` error — use `bd`/`task` directly for those. `--repo` also raises `UNSUPPORTED` on both read and write (beads issues have no repo concept).
-
-The mapping between tasks-axi's model and beads' is lossy in a few documented ways:
-
-- **State/hold.** A beads issue with status `deferred` or `pinned` is surfaced as `queued` with an active hold (`kind: future` / `kind: parked`), so it never shows up in `ready`. Any other status outside the recognized set (beads' built-in `blocked`, or a custom status configured via `status.custom`) is also surfaced as `queued` with an active `kind: captain` hold, rather than falling through to plain `queued`, so unreadiness in beads is never silently lost. Writing a hold only supports the `future`/`parked` kinds, since they're the only ones with a beads status counterpart; other `HoldKind`s (`captain`/`external`/`load`) raise `UNSUPPORTED` on write. `hold --until` is only honored for `kind: future` (beads' `deferred` status is the only one that carries a date via `--defer`).
-- **Links.** `pr`/`report`/`doc` links (e.g. from `done --pr <url>`) round-trip through beads' `metadata` object as `tasks_axi_<kind>` keys. This is last-write-wins per kind, not a list — beads has no native multi-link field.
-- **Body archiving.** `update --body --archive-body` has no separate archive file in beads; the outgoing body is appended to the issue's `notes` via `--append-notes` before the description is replaced.
-
-tasks-axi sources one backend at a time today; running both the markdown backlog and a beads store side by side means invoking tasks-axi twice with different `--backend`/`--file` flags. A true merged multi-source view (one `list` spanning both backends at once) is a tracked follow-up, not yet implemented.
+`fork-upkeep.sh` versions the fork `<upstream>-trillium.<n>` (for example `0.2.7-trillium.1`). After it succeeds, review, then `git push --force-with-lease origin HEAD` and re-run `install-fork.sh --hosts ...`. `fork-drift.sh` exits non-zero if any host is not on the fork build.
 
 ## Development
 

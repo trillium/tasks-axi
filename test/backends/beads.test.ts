@@ -1,784 +1,1198 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { parseBacklog } from "../../src/backends/markdown-grammar.js";
+import { parseConfigToml, resolveConfig } from "../../src/config.js";
+import { resolveTasksContext } from "../../src/context.js";
+import { AxiError } from "../../src/errors.js";
+import {
+  BD_AVAILABLE,
+  makeBeadsBacklog,
+  type TempBeadsBacklog,
+} from "../beads-helpers.js";
+import { BeadsStore } from "../../src/backends/beads.js";
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { BeadsRunResult, BeadsRunner } from "../../src/backends/beads.js";
-import { BeadsStore } from "../../src/backends/beads.js";
-import type {
-  PublicFollowup,
-  PublicFollowupMutation,
-} from "../../src/public-followup.js";
 
-let storePath: string;
-beforeEach(() => {
-  storePath = mkdtempSync(join(tmpdir(), "tasks-axi-beads-"));
-});
-afterEach(() => {
-  rmSync(storePath, { recursive: true, force: true });
-});
+const IT_TIMEOUT = 60_000;
+const HOOK_TIMEOUT = 180_000;
 
-function writeConfigYaml(bdName: string): void {
-  writeFileSync(
-    join(storePath, "config.yaml"),
-    `issue-prefix: "task"\nBD_NAME: "${bdName}"\n`,
-  );
-}
+// ---------------------------------------------------------------------------
+// bd-free tests: config + context wiring
+// ---------------------------------------------------------------------------
 
-interface FakeCall {
-  args: string[];
-  env: NodeJS.ProcessEnv;
-}
+describe("beads config", () => {
+  it("parses the [beads] table", () => {
+    const config = parseConfigToml(
+      ['backend = "beads"', "[beads]", 'dir = "data"', 'bin = "/opt/bd"'].join(
+        "\n",
+      ),
+    );
+    expect(config.backend).toBe("beads");
+    expect(config.beads).toEqual({ dir: "data", bin: "/opt/bd" });
+  });
 
-/**
- * Responses are keyed by the first CLI arg (`list`/`show`/`update`). A single
- * response is replayed for every call; an array is consumed in order, letting
- * a test model a `show` result changing across an update's before/after reads.
- */
-function fakeRunner(
-  responses: Record<string, BeadsRunResult | BeadsRunResult[]>,
-): {
-  run: BeadsRunner;
-  calls: FakeCall[];
-} {
-  const calls: FakeCall[] = [];
-  const run: BeadsRunner = (args, env) => {
-    calls.push({ args, env });
-    const key = args[0];
-    const response = responses[key];
-    if (!response) {
-      throw new Error(
-        `no fake response registered for \`bd ${args.join(" ")}\``,
+  it("resolves beads.dir relative to the project", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tasks-axi-beads-config-"));
+    try {
+      writeFileSync(
+        join(dir, ".tasks.toml"),
+        ['backend = "beads"', "[beads]", 'dir = "data"'].join("\n"),
+        "utf8",
       );
+      const config = resolveConfig({ cwd: dir, home: dir, env: {} });
+      expect(config.backend).toBe("beads");
+      expect(config.beads?.dir).toBe(join(dir, "data"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
-    if (!Array.isArray(response)) return response;
-    const next = response.shift();
-    if (!next) {
-      throw new Error(`fake responses for \`bd ${key}\` exhausted`);
-    }
-    return next;
-  };
-  return { run, calls };
-}
+  });
 
-const LIST_FIXTURE = [
-  {
-    id: "task-vgd7",
-    title: "Implement the thing",
-    description: "Full description of the thing.",
-    status: "open",
-    priority: 1,
-    issue_type: "task",
-    created_at: "2026-07-31T08:53:49Z",
-    updated_at: "2026-07-31T08:53:49Z",
-    dependencies: [
-      {
-        issue_id: "task-vgd7",
-        depends_on_id: "task-n4l9",
-        type: "blocks",
-        created_at: "2026-07-31T01:53:50Z",
-      },
-    ],
-    dependency_count: 1,
-    dependent_count: 0,
-  },
-  {
-    id: "task-n4l9",
-    title: "Evaluate readiness",
-    status: "in_progress",
-    priority: 1,
-    issue_type: "task",
-    created_at: "2026-07-31T08:53:48Z",
-    updated_at: "2026-08-01T08:51:52Z",
-  },
-  {
-    id: "task-done1",
-    title: "Shipped work",
-    status: "closed",
-    priority: 2,
-    issue_type: "bug",
-    created_at: "2026-06-01T08:53:48Z",
-    updated_at: "2026-06-05T08:51:52Z",
-    closed_at: "2026-06-05T08:51:52Z",
-  },
-];
-
-const PUBLIC_FOLLOWUP_FIXTURE: PublicFollowup = {
-  schema_version: 1,
-  revision: 1,
-  request: {
-    request_id: "req-demo",
-    platform: "discord",
-    context_binding: { version: "ctx1", value: "ctx1_abc" },
-    public_safe_summary: "demo",
-    received_at: "2026-07-14T12:00:00Z",
-    followup_expires_at: "2026-10-14T12:00:00Z",
-    reservation_expires_at: "2026-07-14T13:00:00Z",
-  },
-  purpose: "promised-final",
-  expected_final: {
-    type: "pr-merged",
-    project: null,
-    required_deliverables: [],
-    completion_policy: "all-required",
-  },
-  obligation_expires_at: "2026-10-14T12:00:00Z",
-  delivery: {
-    state: "intent",
-    delivery_key: "fd1_abc",
-    payload_digest: null,
-    attempt_count: 0,
-    last_error_code: null,
-    next_attempt_at: null,
-    receipt: null,
-    last_error: null,
-    waiver: null,
-  },
-  work_relations: [],
-  lineage: {
-    predecessor_obligation_id: null,
-    successor_obligation_id: null,
-  },
-};
-
-const PUBLIC_FOLLOWUP_MUTATION_FIXTURE: PublicFollowupMutation = {
-  expectedRevision: 1,
-  expectedPublicFollowup: PUBLIC_FOLLOWUP_FIXTURE,
-  publicFollowup: PUBLIC_FOLLOWUP_FIXTURE,
-};
-
-describe("BeadsStore", () => {
-  describe("capabilities", () => {
-    it("reports beads as read-only with dependency support", () => {
-      writeConfigYaml("task");
-      const { run } = fakeRunner({});
-      const store = new BeadsStore({ storePath, run });
-      expect(store.capabilities()).toEqual({
+  it("resolves a BeadsStore context for backend=beads", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tasks-axi-beads-ctx-"));
+    try {
+      const ctx = resolveTasksContext({
         backend: "beads",
-        deps: true,
-        prune: false,
-        comments: false,
-        fullTextSearch: false,
-        realtimeSync: false,
-        customStates: false,
-        serverMintsIds: true,
-        publicFollowups: false,
+        cwd: dir,
+        home: dir,
+        env: {},
       });
-    });
-  });
-
-  describe("list", () => {
-    it("maps beads issues onto Task and derives blocked-by from list-shape edges", async () => {
-      writeConfigYaml("task");
-      const { run, calls } = fakeRunner({
-        list: { status: 0, stdout: JSON.stringify(LIST_FIXTURE), stderr: "" },
-      });
-      const store = new BeadsStore({ storePath, run });
-
-      const { items, total } = await store.list({});
-      expect(total).toBe(3);
-      expect(calls[0].env.BEADS_DIR).toBe(storePath);
-      expect(calls[0].env.BD_NAME).toBe("task");
-
-      const open = items.find((t) => t.id === "task-vgd7");
-      expect(open?.state).toBe("queued");
-      expect(open?.title).toBe("Implement the thing");
-      expect(open?.body).toBe("Full description of the thing.");
-      expect(open?.kind).toBe("task");
-      expect(open?.priority).toBe(1);
-      expect(open?.created).toBe("2026-07-31");
-      expect(open?.deps).toEqual([{ type: "blocked-by", id: "task-n4l9" }]);
-      expect(open?.meta).toEqual({ beads_status: "open" });
-
-      const inFlight = items.find((t) => t.id === "task-n4l9");
-      expect(inFlight?.state).toBe("in_flight");
-
-      const done = items.find((t) => t.id === "task-done1");
-      expect(done?.state).toBe("done");
-      expect(done?.closed).toBe("2026-06-05");
-    });
-
-    it("filters by state after mapping beads statuses", async () => {
-      const { run } = fakeRunner({
-        list: { status: 0, stdout: JSON.stringify(LIST_FIXTURE), stderr: "" },
-      });
-      const store = new BeadsStore({ storePath, run });
-
-      const { items, total } = await store.list({ state: "queued" });
-      expect(total).toBe(1);
-      expect(items.map((t) => t.id)).toEqual(["task-vgd7"]);
-    });
-
-    it("filters by kind and applies a limit", async () => {
-      const { run } = fakeRunner({
-        list: { status: 0, stdout: JSON.stringify(LIST_FIXTURE), stderr: "" },
-      });
-      const store = new BeadsStore({ storePath, run });
-
-      const byKind = await store.list({ kind: "bug" });
-      expect(byKind.items.map((t) => t.id)).toEqual(["task-done1"]);
-
-      const limited = await store.list({ limit: 1 });
-      expect(limited.total).toBe(3);
-      expect(limited.items).toHaveLength(1);
-    });
-
-    it("maps show-shape dependency edges (embedded blocker issue + dependency_type)", async () => {
-      const { run } = fakeRunner({
-        list: {
-          status: 0,
-          stdout: JSON.stringify([
-            {
-              id: "task-a",
-              title: "A",
-              status: "open",
-              dependencies: [
-                { id: "task-b", dependency_type: "blocks" },
-                { id: "task-c", dependency_type: "related" },
-              ],
-            },
-          ]),
-          stderr: "",
-        },
-      });
-      const store = new BeadsStore({ storePath, run });
-      const { items } = await store.list({});
-      expect(items[0].deps).toEqual([{ type: "blocked-by", id: "task-b" }]);
-    });
-
-    it("maps deferred/pinned statuses to queued plus an active hold, not plain queued", async () => {
-      const { run } = fakeRunner({
-        list: {
-          status: 0,
-          stdout: JSON.stringify([
-            { id: "task-deferred", title: "Deferred", status: "deferred" },
-            { id: "task-pinned", title: "Pinned", status: "pinned" },
-            { id: "task-open", title: "Open", status: "open" },
-          ]),
-          stderr: "",
-        },
-      });
-      const store = new BeadsStore({ storePath, run });
-      const { items } = await store.list({});
-
-      const deferred = items.find((t) => t.id === "task-deferred");
-      expect(deferred?.state).toBe("queued");
-      expect(deferred?.hold).toEqual({
-        reason: "beads status: deferred",
-        kind: "future",
-      });
-
-      const pinned = items.find((t) => t.id === "task-pinned");
-      expect(pinned?.state).toBe("queued");
-      expect(pinned?.hold).toEqual({
-        reason: "beads status: pinned",
-        kind: "parked",
-      });
-
-      const open = items.find((t) => t.id === "task-open");
-      expect(open?.hold).toBeUndefined();
-    });
-
-    it("maps beads' built-in blocked status and any custom status to a captain hold, not plain queued", async () => {
-      const { run } = fakeRunner({
-        list: {
-          status: 0,
-          stdout: JSON.stringify([
-            { id: "task-blocked", title: "Blocked", status: "blocked" },
-            { id: "task-custom", title: "Custom", status: "in_review" },
-          ]),
-          stderr: "",
-        },
-      });
-      const store = new BeadsStore({ storePath, run });
-      const { items } = await store.list({});
-
-      const blocked = items.find((t) => t.id === "task-blocked");
-      expect(blocked?.state).toBe("queued");
-      expect(blocked?.hold).toEqual({
-        reason: "beads status: blocked",
-        kind: "captain",
-      });
-
-      const custom = items.find((t) => t.id === "task-custom");
-      expect(custom?.state).toBe("queued");
-      expect(custom?.hold).toEqual({
-        reason: "beads status: in_review",
-        kind: "captain",
-      });
-    });
-
-    it("throws UNSUPPORTED when filtering by --repo (beads has no repo concept)", async () => {
-      const { run } = fakeRunner({
-        list: { status: 0, stdout: JSON.stringify(LIST_FIXTURE), stderr: "" },
-      });
-      const store = new BeadsStore({ storePath, run });
-      await expect(store.list({ repo: "acme" })).rejects.toMatchObject({
-        code: "UNSUPPORTED",
-      });
-    });
-
-    it("throws a structured error when the CLI exits non-zero", async () => {
-      const { run } = fakeRunner({
-        list: { status: 1, stdout: "", stderr: "dolt server unreachable" },
-      });
-      const store = new BeadsStore({ storePath, run });
-      await expect(store.list({})).rejects.toMatchObject({
-        message: expect.stringContaining("dolt server unreachable"),
-      });
-    });
-  });
-
-  describe("get", () => {
-    it("returns the mapped task when found", async () => {
-      const { run } = fakeRunner({
-        show: {
-          status: 0,
-          stdout: JSON.stringify([LIST_FIXTURE[0]]),
-          stderr: "",
-        },
-      });
-      const store = new BeadsStore({ storePath, run });
-      const task = await store.get("task-vgd7");
-      expect(task?.title).toBe("Implement the thing");
-    });
-
-    it("returns null when the CLI reports no matching issue", async () => {
-      const { run } = fakeRunner({
-        show: {
-          status: 1,
-          stdout: JSON.stringify({
-            error: "no issues found matching the provided IDs",
-            schema_version: 1,
-          }),
-          stderr:
-            'Error fetching task-bogus: no issue found matching "task-bogus"',
-        },
-      });
-      const store = new BeadsStore({ storePath, run });
-      expect(await store.get("task-bogus")).toBeNull();
-    });
-
-    it("passes the id via --id= rather than as a bare positional", async () => {
-      const { run, calls } = fakeRunner({
-        show: {
-          status: 0,
-          stdout: JSON.stringify([LIST_FIXTURE[0]]),
-          stderr: "",
-        },
-      });
-      const store = new BeadsStore({ storePath, run });
-      await store.get("task-vgd7");
-      expect(calls[0].args).toEqual(["show", "--id=task-vgd7", "--json"]);
-    });
-
-    it("throws for any other CLI failure", async () => {
-      const { run } = fakeRunner({
-        show: { status: 1, stdout: "", stderr: "permission denied" },
-      });
-      const store = new BeadsStore({ storePath, run });
-      await expect(store.get("task-vgd7")).rejects.toMatchObject({
-        message: expect.stringContaining("permission denied"),
-      });
-    });
-  });
-
-  describe("still-unsupported write methods", () => {
-    const write = (
-      method: string,
-      call: (store: BeadsStore) => Promise<unknown>,
-    ) =>
-      it(`${method} throws UNSUPPORTED`, async () => {
-        const { run } = fakeRunner({});
-        const store = new BeadsStore({ storePath, run });
-        await expect(call(store)).rejects.toMatchObject({
-          code: "UNSUPPORTED",
-        });
-      });
-
-    write("create", (s) => s.create({ id: "x", title: "x" }));
-    write("remove", (s) => s.remove("x"));
-    write("addDep", (s) => s.addDep("x", { type: "blocked-by", id: "y" }));
-    write("removeDep", (s) =>
-      s.removeDep("x", { type: "blocked-by", id: "y" }),
-    );
-    write("updatePublicFollowup", (s) =>
-      s.updatePublicFollowup("x", PUBLIC_FOLLOWUP_MUTATION_FIXTURE),
-    );
-  });
-
-  describe("transition", () => {
-    function issue(overrides: Partial<(typeof LIST_FIXTURE)[0]>) {
-      return { ...LIST_FIXTURE[0], ...overrides };
+      expect(ctx.store).toBeInstanceOf(BeadsStore);
+      expect(ctx.store.capabilities().backend).toBe("beads");
+      expect(ctx.store.capabilities().publicFollowups).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
-
-    it("start: writes --status in_progress and returns the re-read task", async () => {
-      const { run, calls } = fakeRunner({
-        update: { status: 0, stdout: "", stderr: "" },
-        show: {
-          status: 0,
-          stdout: JSON.stringify([issue({ status: "in_progress" })]),
-          stderr: "",
-        },
-      });
-      const store = new BeadsStore({ storePath, run });
-      const task = await store.transition("task-vgd7", "in_flight");
-
-      expect(task.state).toBe("in_flight");
-      const updateCall = calls.find((c) => c.args[0] === "update");
-      expect(updateCall?.args).toEqual([
-        "update",
-        "task-vgd7",
-        "--status",
-        "in_progress",
-      ]);
-    });
-
-    it("done: writes --status closed plus note/pr/report and round-trips links via metadata", async () => {
-      const { run, calls } = fakeRunner({
-        update: { status: 0, stdout: "", stderr: "" },
-        show: {
-          status: 0,
-          stdout: JSON.stringify([
-            issue({
-              status: "closed",
-              closed_at: "2026-08-01T00:00:00Z",
-              metadata: {
-                tasks_axi_pr: "https://github.com/o/r/pull/1",
-                tasks_axi_report: "data/x/report.md",
-              },
-            }),
-          ]),
-          stderr: "",
-        },
-      });
-      const store = new BeadsStore({ storePath, run });
-      const task = await store.transition("task-vgd7", "done", {
-        pr: "https://github.com/o/r/pull/1",
-        report: "data/x/report.md",
-        note: "shipped",
-      });
-
-      expect(task.state).toBe("done");
-      expect(task.closed).toBe("2026-08-01");
-      expect(task.links).toEqual(
-        expect.arrayContaining([
-          { kind: "pr", url: "https://github.com/o/r/pull/1" },
-          { kind: "report", url: "data/x/report.md" },
-        ]),
-      );
-      const updateCall = calls.find((c) => c.args[0] === "update");
-      expect(updateCall?.args).toEqual([
-        "update",
-        "task-vgd7",
-        "--status",
-        "closed",
-        "--append-notes",
-        "shipped",
-        "--set-metadata",
-        "tasks_axi_pr=https://github.com/o/r/pull/1",
-        "--set-metadata",
-        "tasks_axi_report=data/x/report.md",
-      ]);
-    });
-
-    it("reopen: writes --status open", async () => {
-      const { run, calls } = fakeRunner({
-        update: { status: 0, stdout: "", stderr: "" },
-        show: {
-          status: 0,
-          stdout: JSON.stringify([issue({ status: "open" })]),
-          stderr: "",
-        },
-      });
-      const store = new BeadsStore({ storePath, run });
-      await store.transition("task-vgd7", "queued");
-      const updateCall = calls.find((c) => c.args[0] === "update");
-      expect(updateCall?.args).toEqual([
-        "update",
-        "task-vgd7",
-        "--status",
-        "open",
-      ]);
-    });
-
-    it("throws a structured error when the update CLI call fails", async () => {
-      const { run } = fakeRunner({
-        update: { status: 1, stdout: "", stderr: "dolt write conflict" },
-      });
-      const store = new BeadsStore({ storePath, run });
-      await expect(store.transition("task-vgd7", "done")).rejects.toMatchObject(
-        {
-          message: expect.stringContaining("dolt write conflict"),
-        },
-      );
-    });
   });
 
-  describe("update", () => {
-    function issue(overrides: Partial<(typeof LIST_FIXTURE)[0]>) {
-      return { ...LIST_FIXTURE[0], ...overrides };
-    }
-
-    it("title: writes --title and reports the changed field", async () => {
-      const { run, calls } = fakeRunner({
-        show: [
-          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
-          {
-            status: 0,
-            stdout: JSON.stringify([issue({ title: "New title" })]),
-            stderr: "",
-          },
-        ],
-        update: { status: 0, stdout: "", stderr: "" },
-      });
-      const store = new BeadsStore({ storePath, run });
-      const result = await store.update("task-vgd7", { title: "New title" });
-
-      expect(result.changed).toEqual(["title"]);
-      expect(result.task.title).toBe("New title");
-      const updateCall = calls.find((c) => c.args[0] === "update");
-      expect(updateCall?.args).toEqual([
-        "update",
-        "task-vgd7",
-        "--title",
-        "New title",
-      ]);
-    });
-
-    it("body: writes --description; archiveBody also appends the old body to notes", async () => {
-      const { run, calls } = fakeRunner({
-        show: [
-          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
-          {
-            status: 0,
-            stdout: JSON.stringify([issue({ description: "New body" })]),
-            stderr: "",
-          },
-        ],
-        update: { status: 0, stdout: "", stderr: "" },
-      });
-      const store = new BeadsStore({ storePath, run });
-      const result = await store.update("task-vgd7", {
-        body: "New body",
-        archiveBody: true,
-      });
-
-      expect(result.changed).toEqual(
-        expect.arrayContaining(["archive", "body"]),
+  it("threads [beads] prefix into the store, rejecting foreign ids before bd runs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tasks-axi-beads-prefix-"));
+    try {
+      writeFileSync(
+        join(dir, ".tasks.toml"),
+        [
+          'backend = "beads"',
+          "[beads]",
+          'prefix = "task"',
+          'bin = "no-such-bd"',
+        ].join("\n"),
+        "utf8",
       );
-      const updateCall = calls.find((c) => c.args[0] === "update");
-      expect(updateCall?.args).toEqual([
-        "update",
-        "task-vgd7",
-        "--description",
-        "New body",
-        "--append-notes",
-        "archived body: Full description of the thing.",
-      ]);
-    });
-
-    it("addBodyLines: appends only lines not already present", async () => {
-      const { run, calls } = fakeRunner({
-        show: [
-          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
-          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
-        ],
-        update: { status: 0, stdout: "", stderr: "" },
-      });
-      const store = new BeadsStore({ storePath, run });
-      await store.update("task-vgd7", {
-        addBodyLines: ["Full description of the thing.", "A new line"],
-      });
-      const updateCall = calls.find((c) => c.args[0] === "update");
-      expect(updateCall?.args).toEqual([
-        "update",
-        "task-vgd7",
-        "--description",
-        "Full description of the thing.\nA new line",
-      ]);
-    });
-
-    it("kind and priority: writes --type and --priority", async () => {
-      const { run, calls } = fakeRunner({
-        show: [
-          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
-          {
-            status: 0,
-            stdout: JSON.stringify([issue({ issue_type: "bug", priority: 3 })]),
-            stderr: "",
-          },
-        ],
-        update: { status: 0, stdout: "", stderr: "" },
-      });
-      const store = new BeadsStore({ storePath, run });
-      const result = await store.update("task-vgd7", {
-        kind: "bug",
-        priority: 3,
-      });
-
-      expect(result.changed).toEqual(
-        expect.arrayContaining(["kind", "priority"]),
-      );
-      const updateCall = calls.find((c) => c.args[0] === "update");
-      expect(updateCall?.args).toEqual(
-        expect.arrayContaining(["--type", "bug", "--priority", "3"]),
-      );
-    });
-
-    it("addLinks: writes pr/report links as metadata and round-trips them on read", async () => {
-      const { run } = fakeRunner({
-        show: [
-          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
-          {
-            status: 0,
-            stdout: JSON.stringify([
-              issue({
-                metadata: { tasks_axi_pr: "https://github.com/o/r/pull/9" },
-              }),
-            ]),
-            stderr: "",
-          },
-        ],
-        update: { status: 0, stdout: "", stderr: "" },
-      });
-      const store = new BeadsStore({ storePath, run });
-      const result = await store.update("task-vgd7", {
-        addLinks: [{ kind: "pr", url: "https://github.com/o/r/pull/9" }],
-      });
-
-      expect(result.changed).toEqual(["links"]);
-      expect(result.task.links).toEqual([
-        { kind: "pr", url: "https://github.com/o/r/pull/9" },
-      ]);
-    });
-
-    it("hold kind=future: writes deferred status, --defer, the reason as notes, and round-trips the reason via metadata", async () => {
-      const { run, calls } = fakeRunner({
-        show: [
-          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
-          {
-            status: 0,
-            stdout: JSON.stringify([
-              issue({
-                status: "deferred",
-                metadata: { tasks_axi_hold_reason: "waiting on API access" },
-              }),
-            ]),
-            stderr: "",
-          },
-        ],
-        update: { status: 0, stdout: "", stderr: "" },
-      });
-      const store = new BeadsStore({ storePath, run });
-      const result = await store.update("task-vgd7", {
-        hold: {
-          reason: "waiting on API access",
-          kind: "future",
-          until: "2026-09-01",
-        },
-      });
-
-      expect(result.changed).toEqual(["hold"]);
-      expect(result.task.hold?.kind).toBe("future");
-      expect(result.task.hold?.reason).toBe("waiting on API access");
-      const updateCall = calls.find((c) => c.args[0] === "update");
-      expect(updateCall?.args).toEqual([
-        "update",
-        "task-vgd7",
-        "--status",
-        "deferred",
-        "--append-notes",
-        "waiting on API access",
-        "--defer",
-        "2026-09-01",
-        "--set-metadata",
-        "tasks_axi_hold_reason=waiting on API access",
-      ]);
-    });
-
-    it("hold kind=parked: writes pinned status", async () => {
-      const { run, calls } = fakeRunner({
-        show: [
-          { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
-          {
-            status: 0,
-            stdout: JSON.stringify([issue({ status: "pinned" })]),
-            stderr: "",
-          },
-        ],
-        update: { status: 0, stdout: "", stderr: "" },
-      });
-      const store = new BeadsStore({ storePath, run });
-      const result = await store.update("task-vgd7", {
-        hold: { reason: "persistent", kind: "parked" },
-      });
-
-      expect(result.task.hold?.kind).toBe("parked");
-      const updateCall = calls.find((c) => c.args[0] === "update");
-      expect(updateCall?.args).toContain("pinned");
-    });
-
-    it("hold kind=captain: throws UNSUPPORTED (beads has no captain-hold status)", async () => {
-      const { run } = fakeRunner({
-        show: { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
-      });
-      const store = new BeadsStore({ storePath, run });
+      const ctx = resolveTasksContext({ cwd: dir, home: dir, env: {} });
       await expect(
-        store.update("task-vgd7", {
-          hold: { reason: "captain review", kind: "captain" },
+        ctx.store.create({ id: "fix-login-k3", title: "wrong prefix" }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        message: expect.stringContaining('configured beads prefix "task-"'),
+      });
+      // A matching id gets past the check and reaches the (missing) binary.
+      await expect(
+        ctx.store.create({ id: "task-fix-login", title: "right prefix" }),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("no-such-bd"),
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("names both backends on an unknown backend", () => {
+    expect(() =>
+      resolveTasksContext({ backend: "sqlite", cwd: tmpdir(), env: {} }),
+    ).toThrowError(/available backends: markdown, beads/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Real-bd Store conformance
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!BD_AVAILABLE)("BeadsStore CRUD", () => {
+  let bl: TempBeadsBacklog;
+  beforeAll(() => {
+    bl = makeBeadsBacklog();
+  }, HOOK_TIMEOUT);
+  afterAll(() => bl.cleanup());
+
+  it(
+    "create round-trips every field and writes the mirror",
+    async () => {
+      const created = await bl.store.create({
+        id: "alpha-a1",
+        title: "ship the widget",
+        kind: "ship",
+        repo: "widgets",
+        priority: 2,
+        body: "first paragraph\n\nsecond paragraph",
+      });
+      expect(created.state).toBe("queued");
+      expect(created.created).toBe("2026-07-01");
+
+      const task = await bl.store.get("alpha-a1");
+      expect(task).not.toBeNull();
+      expect(task?.title).toBe("ship the widget");
+      expect(task?.kind).toBe("ship");
+      expect(task?.repo).toBe("widgets");
+      expect(task?.priority).toBe(2);
+      expect(task?.body).toBe("first paragraph\n\nsecond paragraph");
+      expect(task?.created).toBe("2026-07-01");
+
+      const mirror = bl.mirror();
+      expect(mirror).toContain("## Queued");
+      expect(mirror).toContain(
+        "- [ ] alpha-a1 - ship the widget (repo: widgets) (kind: ship) (priority: 2) (since 2026-07-01)",
+      );
+      expect(mirror).toContain("  first paragraph");
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "rejects a duplicate id with CONFLICT",
+    async () => {
+      await expect(
+        bl.store.create({ id: "alpha-a1", title: "again" }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "creates in_flight work under the In flight section",
+    async () => {
+      await bl.store.create({
+        id: "alpha-a2",
+        title: "started work",
+        state: "in_flight",
+      });
+      const task = await bl.store.get("alpha-a2");
+      expect(task?.state).toBe("in_flight");
+      const mirror = bl.mirror();
+      const inFlight = mirror.indexOf("## In flight");
+      const queued = mirror.indexOf("## Queued");
+      const line = mirror.indexOf("- [ ] alpha-a2 - started work");
+      expect(line).toBeGreaterThan(inFlight);
+      expect(line).toBeLessThan(queued);
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "validates create-time deps",
+    async () => {
+      await expect(
+        bl.store.create({
+          id: "alpha-a3",
+          title: "with dangling dep",
+          deps: [{ type: "blocked-by", id: "missing-m1" }],
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      await expect(
+        bl.store.create({
+          id: "alpha-a4",
+          title: "self block",
+          deps: [{ type: "blocked-by", id: "alpha-a4" }],
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+
+      const created = await bl.store.create({
+        id: "alpha-a5",
+        title: "blocked work",
+        deps: [{ type: "blocked-by", id: "alpha-a1", reason: "waits on a1" }],
+      });
+      expect(created.deps).toEqual([
+        { type: "blocked-by", id: "alpha-a1", reason: "waits on a1" },
+      ]);
+      const task = await bl.store.get("alpha-a5");
+      expect(task?.deps).toEqual([
+        { type: "blocked-by", id: "alpha-a1", reason: "waits on a1" },
+      ]);
+      expect(bl.mirror()).toContain(
+        "- [ ] alpha-a5 - blocked work (since 2026-07-01) blocked-by: alpha-a1 - waits on a1",
+      );
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "lists with filters and in_flight-first order",
+    async () => {
+      const { items, total } = await bl.store.list({});
+      expect(total).toBeGreaterThanOrEqual(3);
+      expect(items[0].id).toBe("alpha-a2");
+      const ships = await bl.store.list({ kind: "ship" });
+      expect(ships.items.map((t) => t.id)).toEqual(["alpha-a1"]);
+      const limited = await bl.store.list({ limit: 1 });
+      expect(limited.items).toHaveLength(1);
+      expect(limited.total).toBe(total);
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "refuses public-followups as unsupported",
+    async () => {
+      await expect(
+        bl.store.create({
+          id: "pf-x1",
+          title: "promise",
+          kind: "public-followup",
         }),
       ).rejects.toMatchObject({ code: "UNSUPPORTED" });
-    });
-
-    it("clearing a hold (hold: null) writes --status open", async () => {
-      const { run, calls } = fakeRunner({
-        show: [
-          {
-            status: 0,
-            stdout: JSON.stringify([issue({ status: "deferred" })]),
-            stderr: "",
-          },
-          {
-            status: 0,
-            stdout: JSON.stringify([issue({ status: "open" })]),
-            stderr: "",
-          },
-        ],
-        update: { status: 0, stdout: "", stderr: "" },
+      await expect(bl.store.updatePublicFollowup()).rejects.toMatchObject({
+        code: "UNSUPPORTED",
       });
-      const store = new BeadsStore({ storePath, run });
-      const result = await store.update("task-vgd7", { hold: null });
+    },
+    IT_TIMEOUT,
+  );
 
-      expect(result.changed).toEqual(["hold"]);
-      expect(result.task.hold).toBeUndefined();
-      const updateCall = calls.find((c) => c.args[0] === "update");
-      expect(updateCall?.args).toEqual([
-        "update",
-        "task-vgd7",
-        "--status",
-        "open",
+  it(
+    "removes an unblocking task and protects a blocking one",
+    async () => {
+      await expect(bl.store.remove("alpha-a1")).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+      });
+      const removed = await bl.store.remove("alpha-a5");
+      expect(removed.id).toBe("alpha-a5");
+      expect(await bl.store.get("alpha-a5")).toBeNull();
+      const gone = await bl.store.remove("alpha-a1");
+      expect(gone.id).toBe("alpha-a1");
+      expect(bl.mirror()).not.toContain("alpha-a1");
+    },
+    IT_TIMEOUT,
+  );
+});
+
+describe.skipIf(!BD_AVAILABLE)("BeadsStore update", () => {
+  let bl: TempBeadsBacklog;
+  beforeAll(async () => {
+    bl = makeBeadsBacklog();
+    await bl.store.create({
+      id: "upd-u1",
+      title: "original title",
+      body: "original body",
+    });
+  }, HOOK_TIMEOUT);
+  afterAll(() => bl.cleanup());
+
+  it(
+    "updates scalar fields and reports changed",
+    async () => {
+      const result = await bl.store.update("upd-u1", {
+        title: "new title",
+        repo: "widgets",
+        kind: "scout",
+        priority: 1,
+      });
+      expect(result.changed.sort()).toEqual([
+        "kind",
+        "priority",
+        "repo",
+        "title",
       ]);
-    });
+      const task = await bl.store.get("upd-u1");
+      expect(task?.title).toBe("new title");
+      expect(task?.repo).toBe("widgets");
+      expect(task?.kind).toBe("scout");
+      expect(task?.priority).toBe(1);
+    },
+    IT_TIMEOUT,
+  );
 
-    it("no-op patch (nothing changed) skips the CLI update call", async () => {
-      const { run, calls } = fakeRunner({
-        show: { status: 0, stdout: JSON.stringify([issue({})]), stderr: "" },
+  it(
+    "treats an identical patch as a no-op",
+    async () => {
+      const result = await bl.store.update("upd-u1", {
+        title: "new title",
+        repo: "widgets",
       });
-      const store = new BeadsStore({ storePath, run });
-      const result = await store.update("task-vgd7", {
-        title: issue({}).title,
-      });
-
       expect(result.changed).toEqual([]);
-      expect(calls.some((c) => c.args[0] === "update")).toBe(false);
-    });
+    },
+    IT_TIMEOUT,
+  );
 
-    it("throws UNSUPPORTED for --repo (beads has no repo concept)", async () => {
-      const { run } = fakeRunner({});
-      const store = new BeadsStore({ storePath, run });
+  it(
+    "adds body lines without duplicating them",
+    async () => {
+      const first = await bl.store.update("upd-u1", {
+        addBodyLines: ["extra line"],
+      });
+      expect(first.changed).toEqual(["body"]);
+      const second = await bl.store.update("upd-u1", {
+        addBodyLines: ["extra line"],
+      });
+      expect(second.changed).toEqual([]);
+      const task = await bl.store.get("upd-u1");
+      expect(task?.body).toBe("original body\nextra line");
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "archives a superseded body on --archive-body, in the file and as a bd comment",
+    async () => {
+      const result = await bl.store.update("upd-u1", {
+        body: "curated replacement",
+        archiveBody: true,
+      });
+      expect(result.changed).toContain("archive");
+      const task = await bl.store.get("upd-u1");
+      expect(task?.body).toBe("curated replacement");
+      const archive = bl.noteArchive();
+      expect(archive).toContain("## Archived 2026-07-01");
+      expect(archive).toContain("original body");
+      const shown = execFileSync("bd", ["show", "upd-u1", "--json"], {
+        cwd: bl.dir,
+        env: { ...process.env, BEADS_DIR: join(bl.dir, ".beads") },
+        timeout: 60_000,
+      }).toString("utf8");
+      const [issue] = JSON.parse(shown) as { comment_count?: number }[];
+      expect(issue.comment_count ?? 0).toBeGreaterThanOrEqual(1);
+    },
+    IT_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "keeps the superseded body when its bd comment cannot be posted",
+    async () => {
+      await bl.store.create({
+        id: "upd-arch",
+        title: "archive ordering",
+        body: "body to preserve",
+      });
+      const wrapper = join(bl.dir, "bd-no-comment.cjs");
+      writeFileSync(
+        wrapper,
+        [
+          "#!/usr/bin/env node",
+          'const { spawnSync } = require("node:child_process");',
+          'if (process.argv[2] === "comment") {',
+          '  process.stderr.write("comment disabled\\n");',
+          "  process.exit(1);",
+          "}",
+          'const r = spawnSync("bd", process.argv.slice(2), { stdio: "inherit" });',
+          "process.exit(r.status ?? 1);",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      chmodSync(wrapper, 0o755);
+      const flaky = new BeadsStore({
+        dir: bl.dir,
+        mirrorPath: bl.mirrorPath,
+        bin: wrapper,
+        now: () => "2026-07-01",
+      });
+      const before = bl.noteArchive();
       await expect(
-        store.update("task-vgd7", { repo: "acme" }),
-      ).rejects.toMatchObject({ code: "UNSUPPORTED" });
+        flaky.update("upd-arch", {
+          body: "curated replacement",
+          archiveBody: true,
+        }),
+      ).rejects.toBeInstanceOf(AxiError);
+      const fresh = new BeadsStore({
+        dir: bl.dir,
+        mirrorPath: bl.mirrorPath,
+        now: () => "2026-07-01",
+      });
+      const task = await fresh.get("upd-arch");
+      expect(task?.body).toBe("body to preserve");
+      expect(bl.noteArchive()).toBe(before);
+    },
+    IT_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "surfaces a bd update that exits 0 without persisting as a structured error",
+    async () => {
+      await bl.store.create({
+        id: "upd-ver",
+        title: "read-back subject",
+        body: "unchanged body",
+      });
+      // A bd whose `update` succeeds without writing anything: the read-back
+      // must name the diverged fields instead of reporting a silent success.
+      const wrapper = join(bl.dir, "bd-noop-update.cjs");
+      writeFileSync(
+        wrapper,
+        [
+          "#!/usr/bin/env node",
+          'const { spawnSync } = require("node:child_process");',
+          'if (process.argv[2] === "update") process.exit(0);',
+          'const r = spawnSync("bd", process.argv.slice(2), { stdio: "inherit" });',
+          "process.exit(r.status ?? 1);",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      chmodSync(wrapper, 0o755);
+      const silent = new BeadsStore({
+        dir: bl.dir,
+        mirrorPath: bl.mirrorPath,
+        bin: wrapper,
+        now: () => "2026-07-01",
+      });
+      await expect(
+        silent.update("upd-ver", { title: "renamed", body: "new body" }),
+      ).rejects.toMatchObject({
+        code: "UNKNOWN",
+        message: expect.stringMatching(
+          /bd update did not persist title, body for "upd-ver"/,
+        ),
+      });
+      await expect(
+        silent.transition("upd-ver", "in_flight"),
+      ).rejects.toMatchObject({
+        code: "UNKNOWN",
+        message: expect.stringContaining("bd transition did not persist"),
+      });
+      const task = await bl.store.get("upd-ver");
+      expect(task?.title).toBe("read-back subject");
+      expect(task?.body).toBe("unchanged body");
+      expect(task?.state).toBe("queued");
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "sets, renders, and clears structured holds",
+    async () => {
+      await bl.store.update("upd-u1", {
+        hold: {
+          reason: "captain decision pending",
+          kind: "captain",
+          until: "2026-08-01",
+        },
+      });
+      let task = await bl.store.get("upd-u1");
+      expect(task?.hold).toEqual({
+        reason: "captain decision pending",
+        kind: "captain",
+        until: "2026-08-01",
+      });
+      expect(bl.mirror()).toContain(
+        "(hold: captain decision pending) (hold-kind: captain) (hold-until: 2026-08-01)",
+      );
+      const cleared = await bl.store.update("upd-u1", { hold: null });
+      expect(cleared.changed).toEqual(["hold"]);
+      task = await bl.store.get("upd-u1");
+      expect(task?.hold).toBeUndefined();
+      expect(bl.mirror()).not.toContain("(hold:");
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "folds added links into the title",
+    async () => {
+      const result = await bl.store.update("upd-u1", {
+        addLinks: [{ kind: "doc", url: "https://example.com/spec" }],
+      });
+      expect(result.changed).toEqual(["links"]);
+      const task = await bl.store.get("upd-u1");
+      expect(task?.title).toBe("new title https://example.com/spec");
+      expect(task?.links).toEqual([
+        { kind: "doc", url: "https://example.com/spec" },
+      ]);
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "round-trips meta through bd metadata",
+    async () => {
+      const result = await bl.store.update("upd-u1", {
+        meta: { home: "main", harness: "claude" },
+      });
+      expect(result.changed).toEqual(["meta"]);
+      const task = await bl.store.get("upd-u1");
+      expect(task?.meta).toEqual({ home: "main", harness: "claude" });
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "keeps an in-flight task in flight when a hold sets or clears --until",
+    async () => {
+      await bl.store.create({
+        id: "upd-u2",
+        title: "held in flight",
+        state: "in_flight",
+      });
+      await bl.store.update("upd-u2", {
+        hold: { reason: "captain gate", until: "2026-09-01" },
+      });
+      let task = await bl.store.get("upd-u2");
+      expect(task?.state).toBe("in_flight");
+      expect(task?.hold).toEqual({
+        reason: "captain gate",
+        until: "2026-09-01",
+      });
+      const mirror = bl.mirror();
+      const inFlight = mirror.indexOf("## In flight");
+      const queued = mirror.indexOf("## Queued");
+      const line = mirror.indexOf("- [ ] upd-u2 - held in flight");
+      expect(line).toBeGreaterThan(inFlight);
+      expect(line).toBeLessThan(queued);
+
+      await bl.store.update("upd-u2", { hold: null });
+      task = await bl.store.get("upd-u2");
+      expect(task?.state).toBe("in_flight");
+      expect(task?.hold).toBeUndefined();
+    },
+    IT_TIMEOUT,
+  );
+});
+
+describe.skipIf(!BD_AVAILABLE)("BeadsStore transitions and deps", () => {
+  let bl: TempBeadsBacklog;
+  beforeAll(async () => {
+    bl = makeBeadsBacklog();
+    await bl.store.create({ id: "flow-f1", title: "the work", created: null });
+    await bl.store.create({ id: "flow-f2", title: "the blocker" });
+  }, HOOK_TIMEOUT);
+  afterAll(() => bl.cleanup());
+
+  it(
+    "start backfills the created date",
+    async () => {
+      const task = await bl.store.transition("flow-f1", "in_flight");
+      expect(task.state).toBe("in_flight");
+      expect(task.created).toBe("2026-07-01");
+      expect((await bl.store.get("flow-f1"))?.state).toBe("in_flight");
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "done records the pr link and closed date",
+    async () => {
+      const task = await bl.store.transition("flow-f1", "done", {
+        pr: "https://github.com/owner/repo/pull/42",
+        note: "landed cleanly",
+      });
+      expect(task.state).toBe("done");
+      expect(task.closed).toBe("2026-07-01");
+      expect(task.links).toEqual([
+        { kind: "pr", url: "https://github.com/owner/repo/pull/42" },
+      ]);
+      expect(task.body).toBe("landed cleanly");
+      expect(bl.mirror()).toContain(
+        "- [x] flow-f1 - the work https://github.com/owner/repo/pull/42 (merged 2026-07-01)",
+      );
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "reopen clears the closed date",
+    async () => {
+      const task = await bl.store.transition("flow-f1", "queued");
+      expect(task.state).toBe("queued");
+      expect(task.closed).toBeUndefined();
+      expect((await bl.store.get("flow-f1"))?.closed).toBeUndefined();
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "addDep and removeDep are idempotent with reasons preserved",
+    async () => {
+      const added = await bl.store.addDep("flow-f1", {
+        type: "blocked-by",
+        id: "flow-f2",
+        reason: "waits on the blocker",
+      });
+      expect(added).toBe(true);
+      const again = await bl.store.addDep("flow-f1", {
+        type: "blocked-by",
+        id: "flow-f2",
+      });
+      expect(again).toBe(false);
+      let task = await bl.store.get("flow-f1");
+      expect(task?.deps).toEqual([
+        { type: "blocked-by", id: "flow-f2", reason: "waits on the blocker" },
+      ]);
+      await expect(
+        bl.store.addDep("flow-f1", { type: "blocked-by", id: "missing-m9" }),
+      ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+
+      const removed = await bl.store.removeDep("flow-f1", {
+        type: "blocked-by",
+        id: "flow-f2",
+      });
+      expect(removed).toBe(true);
+      const removedAgain = await bl.store.removeDep("flow-f1", {
+        type: "blocked-by",
+        id: "flow-f2",
+      });
+      expect(removedAgain).toBe(false);
+      task = await bl.store.get("flow-f1");
+      expect(task?.deps).toEqual([]);
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "refuses a second relationship type to the same task pair",
+    async () => {
+      await bl.store.create({ id: "flow-f3", title: "shared target" });
+      await bl.store.addDep("flow-f1", { type: "parent", id: "flow-f3" });
+      await expect(
+        bl.store.addDep("flow-f1", { type: "blocked-by", id: "flow-f3" }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        message: expect.stringContaining("parent edge"),
+      });
+      let task = await bl.store.get("flow-f1");
+      expect(task?.deps).toEqual([{ type: "parent", id: "flow-f3" }]);
+      const removed = await bl.store.removeDep("flow-f1", {
+        type: "parent",
+        id: "flow-f3",
+      });
+      expect(removed).toBe(true);
+      task = await bl.store.get("flow-f1");
+      expect(task?.deps).toEqual([]);
+    },
+    IT_TIMEOUT,
+  );
+});
+
+describe.skipIf(!BD_AVAILABLE)("BeadsStore maintenance and mirror", () => {
+  let bl: TempBeadsBacklog;
+  beforeAll(async () => {
+    bl = makeBeadsBacklog();
+    for (const [id, closed] of [
+      ["old-o1", "2026-06-01"],
+      ["old-o2", "2026-06-02"],
+      ["old-o3", "2026-06-03"],
+    ] as const) {
+      await bl.store.create({ id, title: `finished ${id}`, created: null });
+      await bl.store.transition(id, "done", { date: closed });
+    }
+    await bl.store.create({ id: "live-l1", title: "still queued" });
+  }, HOOK_TIMEOUT);
+  afterAll(() => bl.cleanup());
+
+  it(
+    "prune keeps the newest done tasks and archives the surplus",
+    async () => {
+      const result = await bl.store.prune({
+        state: "done",
+        keep: 1,
+        archive: true,
+      });
+      expect(result.archived).toBe(2);
+      expect(result.ids.sort()).toEqual(["old-o1", "old-o2"]);
+      const { items } = await bl.store.list({ state: "done" });
+      expect(items.map((t) => t.id)).toEqual(["old-o3"]);
+      expect(await bl.store.get("old-o1")).toBeNull();
+      const archive = bl.archive();
+      expect(archive).toContain("## Archived 2026-07-01");
+      expect(archive).toContain(
+        "- [x] old-o1 - finished old-o1 (done 2026-06-01)",
+      );
+      expect(archive).toContain(
+        "- [x] old-o2 - finished old-o2 (done 2026-06-02)",
+      );
+      expect(bl.mirror()).not.toContain("old-o1");
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "render rewrites the mirror and reports the task count",
+    async () => {
+      const count = await bl.store.render();
+      expect(count).toBe(2);
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "the mirror parses back into the same tasks",
+    async () => {
+      const doc = parseBacklog(bl.mirror());
+      const parsed = doc.sections.flatMap((section) =>
+        section.entries.flatMap((entry) =>
+          entry.kind === "task" ? [entry.task] : [],
+        ),
+      );
+      const { items } = await bl.store.list({});
+      expect(parsed.map((t) => [t.id, t.state, t.title])).toEqual(
+        items.map((t) => [t.id, t.state, t.title]),
+      );
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "reports a missing database as an actionable error",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "tasks-axi-nodb-"));
+      try {
+        const store = new BeadsStore({
+          dir,
+          mirrorPath: join(dir, "backlog.md"),
+        });
+        await expect(store.list({})).rejects.toSatisfy((error: unknown) => {
+          const axi = error as AxiError;
+          return (
+            axi.code === "VALIDATION_ERROR" &&
+            /no beads database found/.test(axi.message)
+          );
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    IT_TIMEOUT,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Optional mirror and a config-only binary/workspace swap
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!BD_AVAILABLE)("BeadsStore without a mirror", () => {
+  let bl: TempBeadsBacklog;
+  beforeAll(() => {
+    bl = makeBeadsBacklog();
+  }, HOOK_TIMEOUT);
+  afterAll(() => bl.cleanup());
+
+  it(
+    "writes no mirror, archive or lock file when none is configured",
+    async () => {
+      const store = new BeadsStore({ dir: bl.dir, now: () => "2026-07-01" });
+      await store.create({ id: "nm-a1", title: "first", body: "kept body" });
+      await store.create({ id: "nm-a2", title: "second", created: null });
+      await store.transition("nm-a2", "done", { date: "2026-06-01" });
+      await store.transition("nm-a1", "in_flight");
+      await store.update("nm-a1", { body: "curated", archiveBody: true });
+      const pruned = await store.prune({
+        state: "done",
+        keep: 0,
+        archive: true,
+      });
+      expect(pruned.ids).toEqual(["nm-a2"]);
+      expect(await store.render()).toBe(1);
+
+      const files = readdirSync(bl.dir);
+      for (const name of ["backlog.md", "done-archive.md", "note-archive.md"]) {
+        expect(files).not.toContain(name);
+      }
+      expect(files.filter((name) => name.endsWith(".lock"))).toEqual([]);
+      expect((await store.get("nm-a1"))?.body).toBe("curated");
+      // The superseded body survives as a bd comment even with no file archive.
+      const comments = execFileSync("bd", ["comments", "nm-a1", "--json"], {
+        cwd: bl.dir,
+        env: { ...process.env, BEADS_DIR: join(bl.dir, ".beads") },
+        encoding: "utf8",
+      });
+      expect(comments).toContain("kept body");
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "still writes the archive file when archivePath is configured",
+    async () => {
+      const archivePath = join(bl.dir, "elsewhere", "done.md");
+      const store = new BeadsStore({
+        dir: bl.dir,
+        archivePath,
+        now: () => "2026-07-01",
+      });
+      await store.create({ id: "nm-b1", title: "old", created: null });
+      await store.transition("nm-b1", "done", { date: "2026-06-01" });
+      await store.prune({ state: "done", keep: 0, archive: true });
+      expect(readFileSync(archivePath, "utf8")).toContain("nm-b1");
+      expect(readdirSync(bl.dir)).not.toContain("done-archive.md");
+    },
+    IT_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "runs a wrapper binary with no dir, leaving workspace selection to it",
+    async () => {
+      // A wrapper pins the workspace itself, as a store launcher script would;
+      // tasks-axi is configured with nothing but the executable.
+      const wrapper = join(bl.dir, "pinned-bd.cjs");
+      writeFileSync(
+        wrapper,
+        [
+          "#!/usr/bin/env node",
+          'const { spawnSync } = require("node:child_process");',
+          "const r = spawnSync(",
+          '  "bd",',
+          "  process.argv.slice(2),",
+          "  {",
+          '    stdio: "inherit",',
+          `    cwd: ${JSON.stringify(bl.dir)},`,
+          `    env: { ...process.env, BEADS_DIR: ${JSON.stringify(join(bl.dir, ".beads"))} },`,
+          "  },",
+          ");",
+          "process.exit(r.status ?? 1);",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      chmodSync(wrapper, 0o755);
+      const elsewhere = mkdtempSync(join(tmpdir(), "tasks-axi-nowork-"));
+      const previous = process.cwd();
+      try {
+        process.chdir(elsewhere);
+        const store = new BeadsStore({ bin: wrapper, now: () => "2026-07-01" });
+        await store.create({ id: "nm-w1", title: "via wrapper" });
+        await store.transition("nm-w1", "in_flight");
+        expect((await store.get("nm-w1"))?.state).toBe("in_flight");
+        expect(readdirSync(elsewhere)).toEqual([]);
+      } finally {
+        process.chdir(previous);
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
+      expect((await bl.store.get("nm-w1"))?.title).toBe("via wrapper");
+    },
+    IT_TIMEOUT,
+  );
+});
+
+describe.skipIf(!BD_AVAILABLE)("BeadsStore lock wait", () => {
+  let bl: TempBeadsBacklog;
+  beforeAll(() => {
+    bl = makeBeadsBacklog();
+  }, HOOK_TIMEOUT);
+  afterAll(() => bl.cleanup());
+
+  it(
+    "queues parallel writers on the default wait instead of failing",
+    async () => {
+      const a = new BeadsStore({ dir: bl.dir, now: () => "2026-07-01" });
+      const b = new BeadsStore({ dir: bl.dir, now: () => "2026-07-01" });
+      await Promise.all([
+        a.create({ id: "lk-a1", title: "from a" }),
+        b.create({ id: "lk-b1", title: "from b" }),
+        a.create({ id: "lk-a2", title: "also a" }),
+      ]);
+      const ids = (await a.list({})).items.map((t) => t.id);
+      expect(ids).toEqual(expect.arrayContaining(["lk-a1", "lk-b1", "lk-a2"]));
+    },
+    IT_TIMEOUT * 3,
+  );
+
+  it(
+    "fails with LOCKED once a configured wait runs out",
+    async () => {
+      const holder = new BeadsStore({ dir: bl.dir, now: () => "2026-07-01" });
+      const impatient = new BeadsStore({
+        dir: bl.dir,
+        lockTimeoutMs: 50,
+        now: () => "2026-07-01",
+      });
+      const held = holder.create({ id: "lk-c1", title: "slow writer" });
+      await expect(
+        impatient.create({ id: "lk-c2", title: "gives up" }),
+      ).rejects.toMatchObject({ code: "LOCKED" });
+      await held;
+      expect(await impatient.get("lk-c2")).toBeNull();
+    },
+    IT_TIMEOUT,
+  );
+});
+
+describe.skipIf(!BD_AVAILABLE)("BeadsStore id prefix", () => {
+  let bl: TempBeadsBacklog;
+  beforeAll(() => {
+    bl = makeBeadsBacklog();
+  }, HOOK_TIMEOUT);
+  afterAll(() => bl.cleanup());
+
+  it(
+    "creates ids under the configured prefix without forcing them past bd",
+    async () => {
+      const store = new BeadsStore({
+        dir: bl.dir,
+        prefix: "tst",
+        now: () => "2026-07-01",
+      });
+      await store.create({ id: "tst-wire-up-login", title: "slug id" });
+      expect((await store.get("tst-wire-up-login"))?.title).toBe("slug id");
+      await expect(
+        store.create({ id: "other-1", title: "foreign" }),
+      ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      expect(await store.get("other-1")).toBeNull();
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "surfaces bd's own prefix error when the configured prefix is wrong",
+    async () => {
+      const store = new BeadsStore({
+        dir: bl.dir,
+        prefix: "zzz",
+        now: () => "2026-07-01",
+      });
+      await expect(
+        store.create({ id: "zzz-1", title: "bd disagrees" }),
+      ).rejects.toMatchObject({
+        message: expect.stringMatching(/prefix mismatch/i),
+      });
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "keeps accepting any slug when no prefix is configured",
+    async () => {
+      await bl.store.create({ id: "anything-goes", title: "forced" });
+      expect((await bl.store.get("anything-goes"))?.title).toBe("forced");
+    },
+    IT_TIMEOUT,
+  );
+});
+
+describe.skipIf(!BD_AVAILABLE)("BeadsStore label scope", () => {
+  let bl: TempBeadsBacklog;
+  const bd = (...args: string[]): string =>
+    execFileSync("bd", args, {
+      cwd: bl.dir,
+      env: { ...process.env, BEADS_DIR: join(bl.dir, ".beads") },
+      encoding: "utf8",
     });
-  });
+  beforeAll(() => {
+    bl = makeBeadsBacklog();
+  }, HOOK_TIMEOUT);
+  afterAll(() => bl.cleanup());
+
+  it(
+    "only sees labelled beads and labels what it creates",
+    async () => {
+      bd(
+        "create",
+        "--title",
+        "unrelated native",
+        "--id",
+        "ls-native",
+        "--force",
+        "--silent",
+      );
+      const scoped = new BeadsStore({
+        dir: bl.dir,
+        label: "src:scope-test",
+        now: () => "2026-07-01",
+      });
+      expect((await scoped.list({})).total).toBe(0);
+      expect(await scoped.get("ls-native")).toBeNull();
+
+      await scoped.create({ id: "ls-one", title: "scoped one" });
+      await scoped.create({
+        id: "ls-two",
+        title: "scoped two",
+        deps: [{ type: "blocked-by", id: "ls-one" }],
+      });
+      expect((await scoped.list({})).items.map((t) => t.id)).toEqual([
+        "ls-one",
+        "ls-two",
+      ]);
+      expect(JSON.parse(bd("show", "ls-one", "--json"))[0].labels).toContain(
+        "src:scope-test",
+      );
+
+      // The unscoped store sees everything; the scoped one never sees
+      // ls-native, so it cannot target it either.
+      expect((await bl.store.list({})).total).toBe(3);
+      await expect(
+        scoped.transition("ls-native", "done"),
+      ).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(
+        JSON.parse(bd("show", "ls-native", "--json"))[0].status,
+      ).toBe("open");
+
+      // A blocker outside the scope does not count as an existing task.
+      await expect(
+        scoped.create({
+          id: "ls-three",
+          title: "x",
+          deps: [{ type: "blocked-by", id: "ls-native" }],
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "keeps its mirror to the scoped tasks",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "tasks-axi-label-mirror-"));
+      try {
+        const mirror = join(dir, "backlog.md");
+        const scoped = new BeadsStore({
+          dir: bl.dir,
+          label: "src:scope-test",
+          mirrorPath: mirror,
+          now: () => "2026-07-01",
+        });
+        await scoped.transition("ls-one", "in_flight");
+        const text = readFileSync(mirror, "utf8");
+        expect(text).toContain("ls-one");
+        expect(text).toContain("ls-two");
+        expect(text).not.toContain("ls-native");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    IT_TIMEOUT,
+  );
+});
+
+describe.skipIf(!BD_AVAILABLE)("BeadsStore native beads", () => {
+  let bl: TempBeadsBacklog;
+  const bd = (...args: string[]): string =>
+    execFileSync("bd", args, {
+      cwd: bl.dir,
+      env: { ...process.env, BEADS_DIR: join(bl.dir, ".beads") },
+      encoding: "utf8",
+    });
+  // The local date of a bd UTC timestamp, computed independently of the store.
+  const localDay = (stamp: string): string => {
+    const d = new Date(stamp);
+    return [
+      d.getFullYear(),
+      String(d.getMonth() + 1).padStart(2, "0"),
+      String(d.getDate()).padStart(2, "0"),
+    ].join("-");
+  };
+  const showJson = (
+    id: string,
+  ): { created_at: string; closed_at?: string; close_reason?: string } => {
+    const parsed = JSON.parse(bd("show", id, "--json")) as unknown;
+    return (Array.isArray(parsed) ? parsed[0] : parsed) as {
+      created_at: string;
+      closed_at?: string;
+      close_reason?: string;
+    };
+  };
+
+  beforeAll(() => {
+    bl = makeBeadsBacklog();
+    bd(
+      "create",
+      "--title",
+      "native bug",
+      "--id",
+      "tst-nat1",
+      "-t",
+      "bug",
+      "-p",
+      "0",
+      "--silent",
+    );
+    bd("create", "--title", "native plain", "--id", "tst-nat2", "--silent");
+    bd(
+      "create",
+      "--title",
+      "native closed",
+      "--id",
+      "tst-nat3",
+      "-t",
+      "feature",
+      "-p",
+      "3",
+      "--silent",
+    );
+    bd("close", "tst-nat3", "--reason", "finished natively");
+  }, HOOK_TIMEOUT);
+  afterAll(() => bl.cleanup());
+
+  it(
+    "reads priority, issue type and dates from bd for an untouched issue",
+    async () => {
+      const bug = await bl.store.get("tst-nat1");
+      expect(bug).toMatchObject({
+        state: "queued",
+        kind: "bug",
+        priority: 0,
+        created: localDay(showJson("tst-nat1").created_at),
+      });
+      expect(bug?.closed).toBeUndefined();
+
+      const plain = await bl.store.get("tst-nat2");
+      expect(plain?.kind).toBeUndefined();
+      expect(plain?.priority).toBe(2);
+
+      const closed = await bl.store.get("tst-nat3");
+      expect(closed).toMatchObject({
+        state: "done",
+        kind: "feature",
+        priority: 3,
+        closed: localDay(showJson("tst-nat3").closed_at as string),
+      });
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "keeps the native values, with no fabricated date, after a tasks-axi write",
+    async () => {
+      const before = await bl.store.get("tst-nat1");
+      const started = await bl.store.transition("tst-nat1", "in_flight", {
+        date: "2030-01-01",
+      });
+      expect(started).toMatchObject({
+        state: "in_flight",
+        kind: "bug",
+        priority: 0,
+        created: before?.created,
+      });
+      const reread = await new BeadsStore({
+        dir: bl.dir,
+        now: () => "2030-01-01",
+      }).get("tst-nat1");
+      expect(reread).toMatchObject({ kind: "bug", priority: 0 });
+      expect(reread?.created).toBe(before?.created);
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "does not mistake bd's default priority for one on tasks-axi-written issues",
+    async () => {
+      const created = await bl.store.create({ id: "nat-own", title: "mine" });
+      expect(created.priority).toBeUndefined();
+      expect((await bl.store.get("nat-own"))?.priority).toBeUndefined();
+      expect((await bl.store.get("nat-own"))?.kind).toBeUndefined();
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "records a close reason: the pr url when given, else a default",
+    async () => {
+      await bl.store.create({ id: "nat-pr", title: "closed with a pr" });
+      await bl.store.create({ id: "nat-bare", title: "closed bare" });
+      await bl.store.create({
+        id: "nat-blocked",
+        title: "closed while blocked",
+        deps: [{ type: "blocked-by", id: "nat-bare" }],
+      });
+      const pr = "https://github.com/acme/widgets/pull/7";
+      await bl.store.transition("nat-pr", "done", { pr, date: "2026-07-01" });
+      await bl.store.transition("nat-blocked", "done", { date: "2026-07-01" });
+      await bl.store.transition("nat-bare", "done", { date: "2026-07-01" });
+      expect(showJson("nat-pr").close_reason).toBe(pr);
+      expect(showJson("nat-bare").close_reason).toBe("Closed");
+      expect(showJson("nat-blocked").close_reason).toBe("Closed");
+      expect((await bl.store.get("nat-pr"))?.state).toBe("done");
+    },
+    IT_TIMEOUT,
+  );
 });

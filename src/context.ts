@@ -25,8 +25,7 @@ export function resolveTasksContext(
   suggestionGlobals?: SuggestionGlobals,
 ): TasksContext {
   const config = resolveConfig(overrides);
-
-  const store = resolveStore(config);
+  const store = createStore(config);
   return {
     store,
     config,
@@ -34,7 +33,7 @@ export function resolveTasksContext(
   };
 }
 
-function resolveStore(config: ResolvedConfig): Store {
+function createStore(config: ResolvedConfig): Store {
   if (config.backend === "markdown") {
     return new MarkdownStore({
       path: config.path,
@@ -42,10 +41,22 @@ function resolveStore(config: ResolvedConfig): Store {
     });
   }
   if (config.backend === "beads") {
-    return new BeadsStore({ storePath: config.path });
+    // The markdown path doubles as the canonical-markdown mirror the beads
+    // backend keeps, but only when one was configured; otherwise no mirror.
+    return new BeadsStore({
+      ...(config.pathConfigured ? { mirrorPath: config.path } : {}),
+      ...(config.beads?.dir ? { dir: config.beads.dir } : {}),
+      ...(config.beads?.bin ? { bin: config.beads.bin } : {}),
+      ...(config.beads?.prefix ? { prefix: config.beads.prefix } : {}),
+      ...(config.beads?.label ? { label: config.beads.label } : {}),
+      ...(config.beads?.lockTimeoutMs !== undefined
+        ? { lockTimeoutMs: config.beads.lockTimeoutMs }
+        : {}),
+      ...(config.archivePath ? { archivePath: config.archivePath } : {}),
+    });
   }
   throw new AxiError(
-    `Unsupported backend "${config.backend}" — tasks-axi ships markdown and beads backends`,
+    `Unsupported backend "${config.backend}" — available backends: markdown, beads`,
     "UNSUPPORTED",
     [
       'Set `backend = "markdown"` or `backend = "beads"` in .tasks.toml, or omit --backend',

@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { readFileSafe } from "./backends/lock.js";
 import { AxiError } from "./errors.js";
 
@@ -10,21 +10,52 @@ import { AxiError } from "./errors.js";
  * Override order:
  *   --backend / --file flag > TASKS_AXI_* env > project .tasks.toml >
  *   ~/.tasks-axi/config.toml > defaults (markdown, first existing
- *   backlog.md/data/backlog.md, otherwise backlog.md; beads defaults to
- *   ~/data/tasks/.beads).
+ *   backlog.md/data/backlog.md, otherwise backlog.md).
  *
- * P1 ships the markdown (read/write) and beads (read/write for status
- * changes, partial otherwise) backends; the Store seam keeps sqlite/remote
+ * The markdown and beads backends ship today; the Store seam keeps further
  * additions invisible to the CLI layer.
  */
 
 export interface ResolvedConfig {
   backend: string;
-  /** Markdown backlog path (resolved to an absolute path). */
+  /**
+   * Markdown backlog path (resolved to an absolute path). The beads backend
+   * uses it as the canonical-markdown mirror it rewrites after every mutation,
+   * but only when `pathConfigured` is true.
+   */
   path: string;
+  /**
+   * True when `path` was set by `--file`, `TASKS_AXI_FILE` or `[markdown] path`
+   * rather than defaulted. The beads backend writes no mirror otherwise.
+   */
+  pathConfigured?: boolean;
   /** Optional archive path for pruned tasks (resolved to an absolute path). */
   archivePath?: string;
   doneKeep: number;
+  /** Beads backend settings from the `[beads]` table. */
+  beads?: {
+    /**
+     * Workspace directory holding `.beads/` (resolved to an absolute path).
+     * Set by `dir` or its alias `path` (which may name the `.beads` directory
+     * itself). Unset: bd runs from the current directory and finds its own
+     * workspace.
+     */
+    dir?: string;
+    /**
+     * Executable to run (default "bd"). Set by `bin` or its alias `binary`;
+     * any command that accepts bd's arguments works, including a wrapper.
+     */
+    bin?: string;
+    /** Issue-id prefix of the workspace; when set, other ids are rejected. */
+    prefix?: string;
+    /**
+     * Scope label: only beads carrying it are visible, and new tasks get it.
+     * Lets one tasks-axi backlog live inside a shared store.
+     */
+    label?: string;
+    /** How long a mutation waits on another's lock, in ms (default 30000). */
+    lockTimeoutMs?: number;
+  };
 }
 
 export interface ConfigOverrides {
@@ -43,18 +74,25 @@ interface TomlConfig {
     done_keep?: number;
   };
   beads?: {
+    dir?: string;
     path?: string;
+    bin?: string;
+    binary?: string;
+    prefix?: string;
+    label?: string;
+    lock_timeout_ms?: number;
   };
 }
 
 const DEFAULT_KEEP = 10;
 const PATH_CANDIDATES = ["backlog.md", "data/backlog.md"];
-const DEFAULT_BEADS_PATH = ["data", "tasks", ".beads"];
 type ConfigTable = "root" | "markdown" | "beads" | "unsupported";
 
 /**
  * Minimal TOML reader for the tiny config surface we need: a top-level
- * `backend` key and a `[markdown]` table with `path` / `archive` / `done_keep`.
+ * `backend` key, a `[markdown]` table with `path` / `archive` / `done_keep`,
+ * and a `[beads]` table with `dir` (alias `path`) / `bin` (alias `binary`) /
+ * `prefix` / `lock_timeout_ms`.
  * `archive` points at the file that receives pruned tasks.
  * Intentionally not a general TOML parser.
  */
@@ -94,7 +132,27 @@ export function parseConfigToml(src: string): TomlConfig {
     }
     if (table === "beads") {
       config.beads ??= {};
-      if (key === "path") config.beads.path = requireTomlString(value, source);
+      if (key === "lock_timeout_ms") {
+        if (typeof value !== "number") {
+          throw new AxiError(
+            "beads.lock_timeout_ms must be an integer",
+            "VALIDATION_ERROR",
+            ["Set `[beads] lock_timeout_ms = 30000` in .tasks.toml"],
+          );
+        }
+        config.beads.lock_timeout_ms = value;
+        continue;
+      }
+      if (
+        key === "dir" ||
+        key === "path" ||
+        key === "bin" ||
+        key === "binary" ||
+        key === "prefix" ||
+        key === "label"
+      ) {
+        config.beads[key] = requireTomlString(value, source);
+      }
       continue;
     }
     config.markdown ??= {};
@@ -141,7 +199,18 @@ function configKeySource(table: ConfigTable, key: string): string | undefined {
   ) {
     return `markdown.${key}`;
   }
-  if (table === "beads" && key === "path") return "beads.path";
+  if (
+    table === "beads" &&
+    (key === "dir" ||
+      key === "path" ||
+      key === "bin" ||
+      key === "binary" ||
+      key === "prefix" ||
+      key === "label" ||
+      key === "lock_timeout_ms")
+  ) {
+    return `beads.${key}`;
+  }
   return undefined;
 }
 
@@ -171,17 +240,13 @@ function loadToml(path: string): TomlConfig {
   return src ? parseConfigToml(src) : {};
 }
 
-function resolveStorePath(
-  backend: string,
+function resolveMarkdownPath(
   explicit: string | undefined,
   tomlPath: string | undefined,
   cwd: string,
-  home: string,
 ): string {
   const chosen = explicit ?? tomlPath;
   if (chosen) return isAbsolute(chosen) ? chosen : resolve(cwd, chosen);
-
-  if (backend === "beads") return join(home, ...DEFAULT_BEADS_PATH);
 
   for (const candidate of PATH_CANDIDATES) {
     const full = resolve(cwd, candidate);
@@ -222,13 +287,6 @@ export function resolveConfig(overrides: ConfigOverrides = {}): ResolvedConfig {
   const homeToml = loadToml(join(home, ".tasks-axi", "config.toml"));
   const projectToml = loadToml(resolve(cwd, ".tasks.toml"));
 
-  const backend =
-    overrides.backend ??
-    env.TASKS_AXI_BACKEND ??
-    projectToml.backend ??
-    homeToml.backend ??
-    "markdown";
-
   const explicitPath =
     overrides.file !== undefined
       ? validatePathValue(overrides.file, "--file")
@@ -238,13 +296,18 @@ export function resolveConfig(overrides: ConfigOverrides = {}): ResolvedConfig {
   const tomlPath =
     explicitPath !== undefined
       ? undefined
-      : backend === "beads"
-        ? (validatePathValue(projectToml.beads?.path, "beads.path") ??
-          validatePathValue(homeToml.beads?.path, "beads.path"))
-        : (validatePathValue(projectToml.markdown?.path, "markdown.path") ??
-          validatePathValue(homeToml.markdown?.path, "markdown.path"));
+      : projectToml.markdown?.path !== undefined
+        ? validatePathValue(projectToml.markdown.path, "markdown.path")
+        : validatePathValue(homeToml.markdown?.path, "markdown.path");
 
-  const path = resolveStorePath(backend, explicitPath, tomlPath, cwd, home);
+  const backend =
+    overrides.backend ??
+    env.TASKS_AXI_BACKEND ??
+    projectToml.backend ??
+    homeToml.backend ??
+    "markdown";
+
+  const path = resolveMarkdownPath(explicitPath, tomlPath, cwd);
 
   const archive =
     projectToml.markdown?.archive !== undefined
@@ -256,9 +319,108 @@ export function resolveConfig(overrides: ConfigOverrides = {}): ResolvedConfig {
       DEFAULT_KEEP,
   );
 
-  const config: ResolvedConfig = { backend, path, doneKeep };
+  const config: ResolvedConfig = {
+    backend,
+    path,
+    pathConfigured: explicitPath !== undefined || tomlPath !== undefined,
+    doneKeep,
+  };
   if (archive) {
     config.archivePath = isAbsolute(archive) ? archive : resolve(cwd, archive);
   }
+  const beads = resolveBeadsConfig(projectToml, homeToml, cwd, home);
+  if (beads) config.beads = beads;
   return config;
+}
+
+/** Expand a leading `~/` against the home directory. */
+function expandHome(value: string, home: string): string {
+  return value === "~"
+    ? home
+    : value.startsWith("~/")
+      ? join(home, value.slice(2))
+      : value;
+}
+
+/**
+ * Merge the `[beads]` tables. Each file may spell the workspace as `dir` or
+ * `path` and the executable as `bin` or `binary` (the long and short forms are
+ * aliases; `dir`/`bin` win inside one file). The project file beats the home
+ * file key by key. A `path` that names the `.beads` directory itself resolves
+ * to its parent, the directory bd runs from.
+ */
+function resolveBeadsConfig(
+  projectToml: TomlConfig,
+  homeToml: TomlConfig,
+  cwd: string,
+  home: string,
+): ResolvedConfig["beads"] | undefined {
+  const pick = (
+    key: "dir" | "bin" | "prefix" | "label",
+    alias: "path" | "binary" | undefined,
+  ): { value: string; source: string } | undefined => {
+    for (const toml of [projectToml, homeToml]) {
+      if (toml.beads?.[key] !== undefined) {
+        return { value: toml.beads[key], source: `beads.${key}` };
+      }
+      if (alias && toml.beads?.[alias] !== undefined) {
+        return { value: toml.beads[alias], source: `beads.${alias}` };
+      }
+    }
+    return undefined;
+  };
+
+  const beads: NonNullable<ResolvedConfig["beads"]> = {};
+  const dir = pick("dir", "path");
+  if (dir) {
+    const value = validatePathValue(dir.value, dir.source) as string;
+    const absolute = resolve(cwd, expandHome(value, home));
+    beads.dir = basename(absolute) === ".beads" ? dirname(absolute) : absolute;
+  }
+  const bin = pick("bin", "binary");
+  if (bin) {
+    const value = validatePathValue(bin.value, bin.source) as string;
+    beads.bin = expandHome(value, home);
+  }
+  const prefix = pick("prefix", undefined);
+  if (prefix) beads.prefix = validatePrefix(prefix.value);
+  const label = pick("label", undefined);
+  if (label) beads.label = validateLabel(label.value);
+  const lockTimeout =
+    projectToml.beads?.lock_timeout_ms ?? homeToml.beads?.lock_timeout_ms;
+  if (lockTimeout !== undefined) {
+    if (!Number.isSafeInteger(lockTimeout) || lockTimeout < 0) {
+      throw new AxiError(
+        "beads.lock_timeout_ms must be a non-negative integer",
+        "VALIDATION_ERROR",
+        ["Set `[beads] lock_timeout_ms = 30000` in .tasks.toml"],
+      );
+    }
+    beads.lockTimeoutMs = lockTimeout;
+  }
+  return Object.keys(beads).length > 0 ? beads : undefined;
+}
+
+function validateLabel(value: string): string {
+  const label = value.trim();
+  if (label === "" || /[\s,]/.test(label)) {
+    throw new AxiError(
+      "beads.label must be a single bd label with no spaces or commas",
+      "VALIDATION_ERROR",
+      ['Set `[beads] label = "src:my-backlog"` in .tasks.toml, or remove the key'],
+    );
+  }
+  return label;
+}
+
+function validatePrefix(value: string): string {
+  const prefix = value.trim().replace(/-$/, "");
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(prefix)) {
+    throw new AxiError(
+      "beads.prefix must be an issue-id prefix such as `task`",
+      "VALIDATION_ERROR",
+      ['Set `[beads] prefix = "task"` in .tasks.toml, or remove the key'],
+    );
+  }
+  return prefix;
 }
